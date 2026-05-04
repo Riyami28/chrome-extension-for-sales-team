@@ -1,7 +1,9 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Sparkles, Loader2, Search, Presentation, FileText, BookOpen, BarChart3, Wand2 } from "lucide-react";
 import { useAppStore } from "../stores/app-store";
 import { fetchBrandAssets } from "../../shared/utils/brand-assets";
+import { ICPSelector } from "./ICPSelector";
+import { ICP_PROFILES } from "../../shared/constants/icp-profiles";
 import type {
   PersonalizationInput,
   MeetingStage,
@@ -47,10 +49,31 @@ export function PersonalizationForm() {
     setError,
     deepResearchEnabled,
     setDeepResearchEnabled,
+    icpRole,
   } = useAppStore();
 
   const [company, setCompany] = useState("");
   const [role, setRole] = useState("");
+
+  // ICPSelector writes the selected ICP into store.icpRole. We seed the
+  // free-text persona role input with that ICP's canonical label so the
+  // backend's matchICP() keyword matcher resolves it correctly. We only
+  // overwrite when the field is empty or when the user hasn't customized
+  // it away from a known canonical label — manual edits win.
+  const lastSeededLabelRef = useRef<string>("");
+  useEffect(() => {
+    const profile = ICP_PROFILES.find((p) => p.role === icpRole);
+    if (!profile) return;
+    setRole((current) => {
+      const isEmpty = current.trim() === "";
+      const stillSeeded = current === lastSeededLabelRef.current;
+      if (isEmpty || stillSeeded) {
+        lastSeededLabelRef.current = profile.label;
+        return profile.label;
+      }
+      return current;
+    });
+  }, [icpRole]);
   const [dealSize, setDealSize] = useState<DealSizeBand | "">("");
   const [stage, setStage] = useState<MeetingStage | "">("");
   const [clouds, setClouds] = useState<CloudProvider[]>([]);
@@ -166,7 +189,9 @@ export function PersonalizationForm() {
         />
       </Field>
 
-      <Field label="Persona role" required hint="e.g. CFO, VP Engineering, Head of FinOps">
+      <ICPSelector />
+
+      <Field label="Persona role" required hint="Picker above seeds this. Override freely — e.g. CFO, VP Engineering, Head of FinOps">
         <input
           type="text"
           value={role}

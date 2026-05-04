@@ -3,6 +3,7 @@ import { Settings } from "lucide-react";
 import { SettingsPanel } from "./SettingsPanel";
 import { UsageMeter } from "./UsageMeter";
 import { AdminGate } from "./AdminGate";
+import { ModelPicker } from "./ModelPicker";
 import { isAdminUnlocked } from "../../shared/utils/settings-storage";
 
 interface OpenEventDetail {
@@ -47,6 +48,7 @@ export function Header() {
         </div>
 
         <div className="flex items-center gap-2">
+          <ModelPicker />
           <UsageMeter />
           <button
             onClick={requestOpenSettings}
