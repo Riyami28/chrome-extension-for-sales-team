@@ -119,14 +119,19 @@ async def _log_usage(
 
 async def _complete_anthropic(req: LLMRequest) -> LLMResponse:
     client = _anthropic()
+    # The Anthropic SDK uses a `NOT_GIVEN` sentinel for omitted optional
+    # params. Passing Python `None` triggers a validation error. Build kwargs
+    # so `temperature` is only included when the caller actually supplied it.
+    kwargs: dict = {
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "system": req.system or "",
+        "messages": [{"role": "user", "content": req.user}],
+    }
+    if req.temperature is not None:
+        kwargs["temperature"] = req.temperature
     try:
-        resp = await client.messages.create(
-            model=req.model,
-            max_tokens=req.max_tokens,
-            system=req.system or "",
-            temperature=req.temperature,
-            messages=[{"role": "user", "content": req.user}],
-        )
+        resp = await client.messages.create(**kwargs)
     except APIStatusError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     except APIError as e:
@@ -163,14 +168,18 @@ async def _stream_anthropic(req: LLMRequest, user_id: str) -> AsyncIterator[byte
     error_msg: Optional[str] = None
     started = time.perf_counter()
 
+    # Same NOT_GIVEN concern as _complete_anthropic — only pass `temperature`
+    # when the caller supplied a value.
+    stream_kwargs: dict = {
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "system": req.system or "",
+        "messages": [{"role": "user", "content": req.user}],
+    }
+    if req.temperature is not None:
+        stream_kwargs["temperature"] = req.temperature
     try:
-        async with client.messages.stream(
-            model=req.model,
-            max_tokens=req.max_tokens,
-            system=req.system or "",
-            temperature=req.temperature,
-            messages=[{"role": "user", "content": req.user}],
-        ) as stream:
+        async with client.messages.stream(**stream_kwargs) as stream:
             async for delta in stream.text_stream:
                 if delta:
                     payload = json.dumps({"text": delta})
