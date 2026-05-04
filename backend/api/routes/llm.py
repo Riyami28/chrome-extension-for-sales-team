@@ -3,12 +3,18 @@ LLM proxy router.
 
 Replaces direct provider calls from the Chrome extension. The extension calls
 this backend with a Supabase JWT; the backend owns the provider keys and
-forwards the request, logging usage to `generation_history`.
+forwards the request, logging usage to `llm_usage`.
 
-Closes part of #1 (security: provider keys exposed in browser).
+Closes #1 (security: provider keys exposed in browser).
 
-Slice 1 — Anthropic only. Gemini / Groq / OpenAI-compatible providers return
-501 Not Implemented and are tracked as follow-up work in the same issue.
+Providers handled here:
+  - anthropic — via the official `anthropic` SDK (streaming via SDK)
+  - gemini    — via direct HTTPS to `generativelanguage.googleapis.com`
+  - groq      — via direct HTTPS to `api.groq.com` (OpenAI-compatible chat)
+  - custom    — REJECTED at this proxy. Custom is the user-supplied endpoint
+                escape hatch; the extension calls it directly. Documented.
+
+Embeddings (`/embed`) are Gemini-only and used by the in-browser vector store.
 """
 
 from __future__ import annotations
@@ -18,6 +24,7 @@ import json
 import time
 from typing import AsyncIterator, Optional
 
+import httpx
 import structlog
 from anthropic import APIError, APIStatusError, AsyncAnthropic
 from fastapi import APIRouter, HTTPException, Request, status
@@ -58,10 +65,11 @@ class LLMResponse(BaseModel):
     request_id: Optional[str] = None
 
 
-# ── Anthropic client (lazy singleton) ────────────────────────────────────────
+# ── Provider clients (lazy singletons) ───────────────────────────────────────
 
 
 _anthropic_client: Optional[AsyncAnthropic] = None
+_httpx_client: Optional[httpx.AsyncClient] = None
 
 
 def _anthropic() -> AsyncAnthropic:
@@ -76,6 +84,32 @@ def _anthropic() -> AsyncAnthropic:
             )
         _anthropic_client = AsyncAnthropic(api_key=api_key)
     return _anthropic_client
+
+
+def _http() -> httpx.AsyncClient:
+    """Shared httpx client for Gemini / Groq. 60s timeout covers slow models."""
+    global _httpx_client
+    if _httpx_client is None:
+        _httpx_client = httpx.AsyncClient(timeout=60.0)
+    return _httpx_client
+
+
+def _gemini_key() -> str:
+    if not settings.gemini_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GEMINI_API_KEY is not configured on the backend.",
+        )
+    return settings.gemini_api_key
+
+
+def _groq_key() -> str:
+    if not settings.groq_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="GROQ_API_KEY is not configured on the backend.",
+        )
+    return settings.groq_api_key
 
 
 # ── Usage logging (best-effort) ──────────────────────────────────────────────
@@ -224,7 +258,315 @@ async def _stream_anthropic(req: LLMRequest, user_id: str) -> AsyncIterator[byte
         )
 
 
+# ── Gemini dispatch ──────────────────────────────────────────────────────────
+
+
+def _gemini_url(model: str, action: str) -> str:
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{action}"
+
+
+def _gemini_body(req: LLMRequest, *, json_mode: bool = True) -> dict:
+    """
+    Build a Gemini generateContent body. Council prompts expect JSON-only
+    responses; the original GeminiClient appends a JSON instruction and sets
+    `responseMimeType: application/json`. We preserve that contract.
+    """
+    sys_text = (req.system or "")
+    if json_mode:
+        sys_text = f"{sys_text}\nRespond with a single JSON object. No prose, no markdown fences.".strip()
+    body: dict = {
+        "contents": [{"role": "user", "parts": [{"text": req.user}]}],
+        "generationConfig": {
+            "maxOutputTokens": req.max_tokens,
+            "temperature": req.temperature if req.temperature is not None else 0.3,
+        },
+    }
+    if sys_text:
+        body["systemInstruction"] = {"parts": [{"text": sys_text}]}
+    if json_mode:
+        body["generationConfig"]["responseMimeType"] = "application/json"
+    return body
+
+
+async def _complete_gemini(req: LLMRequest) -> LLMResponse:
+    api_key = _gemini_key()
+    url = _gemini_url(req.model, "generateContent")
+    res = await _http().post(
+        url,
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json=_gemini_body(req),
+    )
+    if res.status_code >= 400:
+        raise HTTPException(status_code=res.status_code, detail=f"Gemini {res.status_code}: {res.text[:300]}")
+    data = res.json()
+    text = ""
+    candidates = data.get("candidates") or []
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts)
+    usage = data.get("usageMetadata") or {}
+    return LLMResponse(
+        text=text,
+        model=req.model,
+        usage=LLMUsage(
+            input_tokens=usage.get("promptTokenCount", 0),
+            output_tokens=usage.get("candidatesTokenCount", 0),
+        ),
+        request_id=None,
+    )
+
+
+async def _stream_gemini(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
+    """
+    Gemini streaming via :streamGenerateContent.
+    Returns a JSON array streamed in chunks, each chunk a partial generateContent
+    result. We extract text and re-emit as standard SSE deltas to keep the
+    extension-side parser provider-agnostic.
+    """
+    api_key = _gemini_key()
+    url = _gemini_url(req.model, "streamGenerateContent") + "?alt=sse"
+    input_tokens = 0
+    output_tokens = 0
+    error_msg: Optional[str] = None
+    started = time.perf_counter()
+
+    try:
+        async with _http().stream(
+            "POST",
+            url,
+            headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+            json=_gemini_body(req),
+        ) as res:
+            if res.status_code >= 400:
+                body = await res.aread()
+                error_msg = f"gemini_status_{res.status_code}: {body[:300].decode(errors='replace')}"
+                yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+                return
+
+            async for line in res.aiter_lines():
+                line = line.strip()
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if not payload or payload == "[DONE]":
+                    continue
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                # Extract text from candidates[0].content.parts[*].text
+                cand = (chunk.get("candidates") or [{}])[0]
+                parts = cand.get("content", {}).get("parts") or []
+                delta = "".join(p.get("text", "") for p in parts)
+                if delta:
+                    yield f"event: delta\ndata: {json.dumps({'text': delta})}\n\n".encode()
+                # Some chunks carry running usage; keep last seen.
+                u = chunk.get("usageMetadata") or {}
+                input_tokens = u.get("promptTokenCount", input_tokens)
+                output_tokens = u.get("candidatesTokenCount", output_tokens)
+
+        done = json.dumps(
+            {
+                "model": req.model,
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                "request_id": None,
+            }
+        )
+        yield f"event: done\ndata: {done}\n\n".encode()
+    except httpx.HTTPError as e:
+        error_msg = f"gemini_http_error: {e}"
+        yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+    finally:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        asyncio.create_task(
+            _log_usage(
+                user_id=user_id,
+                provider=req.provider,
+                model=req.model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=elapsed_ms,
+                streamed=True,
+                error=error_msg,
+            )
+        )
+
+
+# ── Groq dispatch (OpenAI-compatible chat completions) ────────────────────────
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+def _groq_body(req: LLMRequest, *, stream: bool = False) -> dict:
+    return {
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature if req.temperature is not None else 0.3,
+        "response_format": {"type": "json_object"},
+        "stream": stream,
+        "messages": [
+            {
+                "role": "system",
+                "content": f"{req.system or ''}\nRespond with a single JSON object. No prose, no markdown fences.".strip(),
+            },
+            {"role": "user", "content": req.user},
+        ],
+    }
+
+
+async def _complete_groq(req: LLMRequest) -> LLMResponse:
+    api_key = _groq_key()
+    res = await _http().post(
+        GROQ_URL,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+        json=_groq_body(req),
+    )
+    if res.status_code >= 400:
+        raise HTTPException(status_code=res.status_code, detail=f"Groq {res.status_code}: {res.text[:300]}")
+    data = res.json()
+    text = ""
+    choices = data.get("choices") or []
+    if choices:
+        text = choices[0].get("message", {}).get("content", "") or ""
+    usage = data.get("usage") or {}
+    return LLMResponse(
+        text=text,
+        model=data.get("model", req.model),
+        usage=LLMUsage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+        ),
+        request_id=data.get("id"),
+    )
+
+
+async def _stream_groq(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
+    """Groq SSE re-emit. Groq returns standard OpenAI chunked SSE."""
+    api_key = _groq_key()
+    input_tokens = 0
+    output_tokens = 0
+    request_id: Optional[str] = None
+    error_msg: Optional[str] = None
+    started = time.perf_counter()
+
+    try:
+        async with _http().stream(
+            "POST",
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json=_groq_body(req, stream=True),
+        ) as res:
+            if res.status_code >= 400:
+                body = await res.aread()
+                error_msg = f"groq_status_{res.status_code}: {body[:300].decode(errors='replace')}"
+                yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+                return
+
+            async for line in res.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                request_id = chunk.get("id") or request_id
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta", {}).get("content")
+                    if delta:
+                        yield f"event: delta\ndata: {json.dumps({'text': delta})}\n\n".encode()
+                # Groq sometimes includes usage on the final chunk.
+                usage = chunk.get("x_groq", {}).get("usage") if "x_groq" in chunk else chunk.get("usage")
+                if usage:
+                    input_tokens = usage.get("prompt_tokens", input_tokens)
+                    output_tokens = usage.get("completion_tokens", output_tokens)
+
+        done = json.dumps(
+            {
+                "model": req.model,
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                "request_id": request_id,
+            }
+        )
+        yield f"event: done\ndata: {done}\n\n".encode()
+    except httpx.HTTPError as e:
+        error_msg = f"groq_http_error: {e}"
+        yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+    finally:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        asyncio.create_task(
+            _log_usage(
+                user_id=user_id,
+                provider=req.provider,
+                model=req.model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=elapsed_ms,
+                streamed=True,
+                request_id=request_id,
+                error=error_msg,
+            )
+        )
+
+
+# ── Embeddings (Gemini text-embedding-004) ───────────────────────────────────
+
+
+class EmbedRequest(BaseModel):
+    """One or many texts to embed. Gemini accepts up to 100 per batch call."""
+
+    texts: list[str] = Field(..., min_length=1, max_length=100)
+    model: str = Field(default="text-embedding-004")
+
+
+class EmbedResponse(BaseModel):
+    vectors: list[list[float]]
+    model: str
+    dims: int
+
+
 # ── Public endpoints ─────────────────────────────────────────────────────────
+
+
+_PROXIED_PROVIDERS = {"anthropic", "gemini", "groq"}
+
+
+def _reject_unproxied(provider: str) -> None:
+    """
+    Reject providers that intentionally do not flow through the proxy.
+
+    `custom` — user-supplied OpenAI-compatible endpoint. The user picks both
+        the URL and the credential. Routing through the backend would require
+        accepting attacker-controlled URLs and credentials, which is worse than
+        leaving the call direct. Documented in the README.
+
+    `ollama` — local-only (`http://localhost:11434`). No security concern;
+        the backend can't reach the user's localhost anyway.
+
+    Anything else not in the proxied set is unsupported.
+    """
+    if provider in {"custom", "ollama"}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Provider '{provider}' is intentionally direct-only and must not be "
+                f"routed through the proxy. Call it from the extension directly."
+            ),
+        )
+    if provider not in _PROXIED_PROVIDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown provider '{provider}'. Supported: {sorted(_PROXIED_PROVIDERS)}.",
+        )
 
 
 @router.post("/v1/llm/complete", response_model=LLMResponse)
@@ -237,21 +579,21 @@ async def complete(request: Request, body: LLMRequest) -> LLMResponse:
     """
     user = request.state.user
     require_permission(user["role"], "generate:create")
-
-    if body.provider != "anthropic":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=(
-                f"Provider '{body.provider}' is not yet wired through the proxy. "
-                f"Tracked as follow-up in the same issue."
-            ),
-        )
+    _reject_unproxied(body.provider)
 
     started = time.perf_counter()
     error_msg: Optional[str] = None
     response: Optional[LLMResponse] = None
     try:
-        response = await _complete_anthropic(body)
+        if body.provider == "anthropic":
+            response = await _complete_anthropic(body)
+        elif body.provider == "gemini":
+            response = await _complete_gemini(body)
+        elif body.provider == "groq":
+            response = await _complete_groq(body)
+        else:
+            # Unreachable — _reject_unproxied above guards this.
+            raise HTTPException(status_code=500, detail="provider dispatch fell through")
         return response
     except HTTPException as e:
         error_msg = f"http_{e.status_code}: {e.detail}"
@@ -294,18 +636,20 @@ async def stream(request: Request, body: LLMRequest) -> StreamingResponse:
     """
     user = request.state.user
     require_permission(user["role"], "generate:create")
+    _reject_unproxied(body.provider)
 
-    if body.provider != "anthropic":
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=(
-                f"Provider '{body.provider}' is not yet wired through the proxy. "
-                f"Tracked as follow-up in the same issue."
-            ),
-        )
+    if body.provider == "anthropic":
+        gen = _stream_anthropic(body, user["id"])
+    elif body.provider == "gemini":
+        gen = _stream_gemini(body, user["id"])
+    elif body.provider == "groq":
+        gen = _stream_groq(body, user["id"])
+    else:
+        # Unreachable — _reject_unproxied above guards this.
+        raise HTTPException(status_code=500, detail="provider dispatch fell through")
 
     return StreamingResponse(
-        _stream_anthropic(body, user["id"]),
+        gen,
         media_type="text/event-stream",
         headers={
             # Disable proxy buffering so deltas arrive promptly.
@@ -316,12 +660,101 @@ async def stream(request: Request, body: LLMRequest) -> StreamingResponse:
     )
 
 
+@router.post("/v1/llm/embed", response_model=EmbedResponse)
+async def embed(request: Request, body: EmbedRequest) -> EmbedResponse:
+    """
+    Embed text via Gemini `text-embedding-004`. Used by the in-browser KB
+    vector store; replaces direct `generativelanguage.googleapis.com` calls
+    from the extension. Returns 768-dim vectors.
+
+    Auth: requires Supabase JWT.
+    Permission: `generate:create`.
+    """
+    user = request.state.user
+    require_permission(user["role"], "generate:create")
+    api_key = _gemini_key()
+    started = time.perf_counter()
+    error_msg: Optional[str] = None
+    total_input_tokens = 0
+    vectors: list[list[float]] = []
+
+    try:
+        # Use batchEmbedContents for >1, embedContent for 1 (smaller payload).
+        if len(body.texts) == 1:
+            url = _gemini_url(body.model, "embedContent")
+            res = await _http().post(
+                url,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json={"content": {"parts": [{"text": body.texts[0]}]}},
+            )
+            if res.status_code >= 400:
+                raise HTTPException(status_code=res.status_code, detail=f"Gemini embed {res.status_code}: {res.text[:300]}")
+            data = res.json()
+            v = (data.get("embedding") or {}).get("values") or []
+            if not isinstance(v, list):
+                raise HTTPException(status_code=502, detail="Gemini embed returned no vector")
+            vectors.append(v)
+        else:
+            url = _gemini_url(body.model, "batchEmbedContents")
+            res = await _http().post(
+                url,
+                headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+                json={
+                    "requests": [
+                        {
+                            "model": f"models/{body.model}",
+                            "content": {"parts": [{"text": t}]},
+                        }
+                        for t in body.texts
+                    ],
+                },
+            )
+            if res.status_code >= 400:
+                raise HTTPException(status_code=res.status_code, detail=f"Gemini embed batch {res.status_code}: {res.text[:300]}")
+            data = res.json()
+            for emb in data.get("embeddings") or []:
+                v = emb.get("values") or []
+                if not isinstance(v, list):
+                    raise HTTPException(status_code=502, detail="Gemini batch embed returned a malformed vector")
+                vectors.append(v)
+
+        dims = len(vectors[0]) if vectors else 0
+        # Approximate input token usage as total characters / 4. Gemini doesn't
+        # return precise tokens for embeddings; we just want a cost-attribution
+        # estimate, not an exact figure.
+        total_input_tokens = sum(len(t) for t in body.texts) // 4
+        return EmbedResponse(vectors=vectors, model=body.model, dims=dims)
+    except HTTPException as e:
+        error_msg = f"http_{e.status_code}: {e.detail}"
+        raise
+    except Exception as e:  # noqa: BLE001
+        error_msg = str(e)
+        raise
+    finally:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        asyncio.create_task(
+            _log_usage(
+                user_id=user["id"],
+                provider="gemini-embed",
+                model=body.model,
+                input_tokens=total_input_tokens,
+                output_tokens=0,
+                duration_ms=elapsed_ms,
+                streamed=False,
+                error=error_msg,
+            )
+        )
+
+
 @router.get("/v1/llm/health")
 async def llm_health() -> dict:
-    """Lightweight health check — confirms the module loaded and the key is set."""
+    """Lightweight health check — confirms the module loaded and which keys are set."""
     return {
         "status": "ok",
-        "providers_wired": ["anthropic"],
-        "providers_pending": ["gemini", "groq", "custom"],
+        "providers_wired": sorted(_PROXIED_PROVIDERS),
+        "providers_direct": ["custom", "ollama"],
         "anthropic_key_configured": bool(settings.anthropic_api_key),
+        "gemini_key_configured": bool(settings.gemini_api_key),
+        "groq_key_configured": bool(settings.groq_api_key),
+        "embed_endpoint": "/api/v1/llm/embed",
     }

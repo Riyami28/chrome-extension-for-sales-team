@@ -32,8 +32,6 @@
     "https://*.supabase.co/*",
     "https://your-backend.railway.app/*",
     "http://localhost:8000/*",
-    "https://api.groq.com/*",
-    "https://generativelanguage.googleapis.com/*",
     "https://api.deepgram.com/*",
     "wss://api.deepgram.com/*",
     "https://www.googleapis.com/*",
