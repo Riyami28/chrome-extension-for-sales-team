@@ -3,8 +3,11 @@ from typing import List
 
 
 class Settings(BaseSettings):
-    # Anthropic
-    anthropic_api_key: str
+    # LLM provider keys — optional per deployment. The proxy returns 503 if a
+    # request comes in for a provider whose key isn't configured.
+    anthropic_api_key: str = ""
+    gemini_api_key: str = ""
+    groq_api_key: str = ""
 
     # Supabase
     supabase_url: str

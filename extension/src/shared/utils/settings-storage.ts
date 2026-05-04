@@ -31,7 +31,18 @@ export interface UserSettings {
    * after the migration window.
    */
   anthropicKey: string;
+  /**
+   * @deprecated since #1 — Gemini chat + embeddings are routed through the
+   * FastAPI backend (`/api/v1/llm/{complete,stream,embed}`). The extension
+   * never holds a Gemini key. Field kept to avoid breaking older hydrated
+   * payloads; ignored on read.
+   */
   geminiKey: string;
+  /**
+   * @deprecated since #1 — Groq is routed through the FastAPI backend.
+   * The extension never holds a Groq key. Field kept to avoid breaking
+   * older hydrated payloads; ignored on read.
+   */
   groqKey: string;
   customLabel: string;
   customBaseUrl: string;
@@ -47,9 +58,12 @@ const EMPTY_INTEGRATION: IntegrationConfig = {
   fields: {},
 };
 
-// Shipped Gemini key — kept as a backfill so the Gemini provider still has a
-// working credential if the user toggles to it from the Settings UI.
-const GEMINI_PRESET_KEY = import.meta.env.VITE_GEMINI_PRESET_KEY ?? "";
+// Shipped Gemini key — historically backfilled so the Gemini provider had a
+// working credential. As of #1, Gemini is proxied via the backend and no
+// extension-side key is ever used. The constant is retained only for
+// backwards-compat with imports; new installs leave `geminiKey` empty.
+const GEMINI_PRESET_KEY = "";
+void (import.meta.env.VITE_GEMINI_PRESET_KEY); // silence unused-env lint
 
 // Active default: Custom provider pointed at Groq's OpenAI-compatible endpoint.
 // Groq is faster than Gemini for the live coach loop and the user supplied a
@@ -87,10 +101,14 @@ const DEFAULTS: UserSettings = {
 
 function hydrate(partial: Partial<UserSettings> | null | undefined): UserSettings {
   const base = { ...DEFAULTS, ...(partial || {}) };
-  // Backfill / refresh Gemini key. Used when the user toggles to Gemini.
-  if (!base.geminiKey || (SUPERSEDED_GEMINI_KEYS as readonly string[]).includes(base.geminiKey)) {
-    base.geminiKey = GEMINI_PRESET_KEY;
-  }
+  // Scrub deprecated provider keys from older hydrated payloads (#1).
+  // Anthropic / Gemini / Groq are all proxied via the backend now; the
+  // extension has no use for these keys. Clearing them prevents stale values
+  // from lingering in chrome.storage.
+  base.anthropicKey = "";
+  base.geminiKey = "";
+  base.groqKey = "";
+  void SUPERSEDED_GEMINI_KEYS; // legacy migration list, kept for future use
   // Force-roll forward any install pinned to a known-dead Custom preset
   // (e.g. the OpenRouter key that ran out of credits). Replace the slot
   // entirely with the current Groq preset so reps don't keep hitting 402s.
@@ -200,10 +218,8 @@ export function lockAdmin(): void {
 
 export function apiKeyFor(provider: LLMProvider): string {
   const s = getSettings();
-  // Anthropic is proxied via the backend (#1) — extension never holds the key.
-  if (provider === "anthropic") return "";
-  if (provider === "gemini") return s.geminiKey;
-  if (provider === "groq") return s.groqKey;
+  // Anthropic / Gemini / Groq are proxied via the backend (#1) — extension
+  // never holds those keys. Only custom (user-supplied endpoint) returns one.
   if (provider === "custom") return s.customKey;
   return "";
 }

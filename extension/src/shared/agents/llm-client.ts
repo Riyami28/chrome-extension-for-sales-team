@@ -68,9 +68,8 @@ export function resolveLLMConfig(override?: { provider: LLMProvider; model: stri
   const modelOverride = override?.model;
 
   if (provider === "gemini") {
-    const apiKey = settings.geminiKey || envKey("VITE_GEMINI_API_KEY");
-    if (!apiKey) return { error: "Add a Gemini API key in Settings." };
-    return { provider, apiKey, model: modelOverride ?? import.meta.env.VITE_GEMINI_MODEL ?? GEMINI_MODEL };
+    // Proxied via backend (#1) — no extension-side key needed.
+    return { provider, apiKey: "", model: modelOverride ?? import.meta.env.VITE_GEMINI_MODEL ?? GEMINI_MODEL };
   }
 
   if (provider === "ollama") {
@@ -83,9 +82,8 @@ export function resolveLLMConfig(override?: { provider: LLMProvider; model: stri
   }
 
   if (provider === "groq") {
-    const apiKey = settings.groqKey || envKey("VITE_GROQ_API_KEY");
-    if (!apiKey) return { error: "Add a Groq API key in Settings." };
-    return { provider, apiKey, model: modelOverride ?? GROQ_MODEL };
+    // Proxied via backend (#1) — no extension-side key needed.
+    return { provider, apiKey: "", model: modelOverride ?? GROQ_MODEL };
   }
 
   if (provider === "custom") {
@@ -183,8 +181,14 @@ async function* readSSE(
   }
 }
 
-class AnthropicClient implements LLMClient {
-  constructor(private cfg: LLMConfig) {}
+/**
+ * Provider-agnostic proxy client. Anthropic / Gemini / Groq all flow through
+ * the same backend endpoints (`/api/v1/llm/complete`, `/api/v1/llm/stream`)
+ * with a `provider` field selecting the upstream. Custom + Ollama stay
+ * direct-only — see `makeLLMClient` for dispatch.
+ */
+class ProxiedLLMClient implements LLMClient {
+  constructor(private provider: "anthropic" | "gemini" | "groq", private model: string, private label: string) {}
 
   async call(system: string, user: string, maxTokens: number): Promise<string> {
     const url = `${backendUrl()}/api/v1/llm/complete`;
@@ -196,8 +200,8 @@ class AnthropicClient implements LLMClient {
         Authorization: `Bearer ${jwt}`,
       },
       body: JSON.stringify({
-        provider: "anthropic",
-        model: this.cfg.model,
+        provider: this.provider,
+        model: this.model,
         system,
         user,
         max_tokens: maxTokens,
@@ -205,7 +209,7 @@ class AnthropicClient implements LLMClient {
     });
     if (!res.ok) {
       const body = await res.text();
-      throw friendlyLLMError("Claude (proxy)", res.status, body);
+      throw friendlyLLMError(`${this.label} (proxy)`, res.status, body);
     }
     const data = (await res.json()) as { text?: string };
     return data.text ?? "";
@@ -226,8 +230,8 @@ class AnthropicClient implements LLMClient {
         Authorization: `Bearer ${jwt}`,
       },
       body: JSON.stringify({
-        provider: "anthropic",
-        model: this.cfg.model,
+        provider: this.provider,
+        model: this.model,
         system,
         user,
         max_tokens: maxTokens,
@@ -235,7 +239,7 @@ class AnthropicClient implements LLMClient {
     });
     if (!res.ok) {
       const body = await res.text();
-      throw friendlyLLMError("Claude (proxy)", res.status, body);
+      throw friendlyLLMError(`${this.label} (proxy)`, res.status, body);
     }
 
     let full = "";
@@ -251,10 +255,10 @@ class AnthropicClient implements LLMClient {
       } else if (frame.event === "error") {
         try {
           const { error } = JSON.parse(frame.data) as { error?: string };
-          throw friendlyLLMError("Claude (proxy)", 0, error ?? "Unknown SSE error");
+          throw friendlyLLMError(`${this.label} (proxy)`, 0, error ?? "Unknown SSE error");
         } catch (err) {
           if (err instanceof Error) throw err;
-          throw new Error("Claude (proxy) stream errored");
+          throw new Error(`${this.label} (proxy) stream errored`);
         }
       }
       // `done` is informational — nothing to do client-side.
@@ -263,34 +267,7 @@ class AnthropicClient implements LLMClient {
   }
 }
 
-class GroqClient implements LLMClient {
-  constructor(private cfg: LLMConfig) {}
-  async call(system: string, user: string, maxTokens: number): Promise<string> {
-    const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.cfg.apiKey}`,
-      },
-      body: JSON.stringify({
-        model: this.cfg.model,
-        max_tokens: maxTokens,
-        temperature: 0.3,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: `${system}\nRespond with a single JSON object. No prose, no markdown fences.` },
-          { role: "user", content: user },
-        ],
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw friendlyLLMError("Groq", res.status, body);
-    }
-    const data = (await res.json()) as { choices: { message: { content: string } }[] };
-    return data.choices[0]?.message?.content ?? "";
-  }
-}
+// Groq is proxied via the backend (#1). See ProxiedLLMClient.
 
 class OllamaClient implements LLMClient {
   constructor(private cfg: LLMConfig) {}
@@ -319,36 +296,7 @@ class OllamaClient implements LLMClient {
   }
 }
 
-class GeminiClient implements LLMClient {
-  constructor(private cfg: LLMConfig) {}
-  async call(system: string, user: string, maxTokens: number): Promise<string> {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.cfg.model}:generateContent`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": this.cfg.apiKey,
-      },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: `${system}\nRespond with a single JSON object. No prose, no markdown fences.` }] },
-        contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: {
-          maxOutputTokens: maxTokens,
-          temperature: 0.3,
-          responseMimeType: "application/json",
-        },
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw friendlyLLMError("Gemini", res.status, body);
-    }
-    const data = (await res.json()) as {
-      candidates?: { content?: { parts?: { text?: string }[] } }[];
-    };
-    return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-  }
-}
+// Gemini is proxied via the backend (#1). See ProxiedLLMClient.
 
 class CustomOpenAICompatClient implements LLMClient {
   constructor(private cfg: LLMConfig) {}
@@ -380,93 +328,87 @@ class CustomOpenAICompatClient implements LLMClient {
   }
 }
 
-// ─── Gemini embeddings ────────────────────────────────────────────────────────
+// ─── Gemini embeddings (proxied) ─────────────────────────────────────────────
 //
-// Embeddings use Gemini regardless of the active chat provider. The Gemini
-// free tier covers our scale (a few thousand embed calls/day) and the user
-// already has a Gemini key wired up. Keeping a separate code path here means
-// switching the chat provider doesn't break vector retrieval.
+// Embeddings use Gemini text-embedding-004. As of #1 they route through the
+// backend's `/api/v1/llm/embed` endpoint, so the extension never holds a
+// Gemini API key. The backend batches up to 100 texts per upstream call;
+// we keep that batching here so callers can pass arbitrarily long lists.
 
 export const EMBEDDING_DIMS = 768;
 
-function geminiEmbedKey(): string {
-  const settings = getSettings();
-  return settings.geminiKey || envKey("VITE_GEMINI_API_KEY") || "";
+interface ProxyEmbedResponse {
+  vectors: number[][];
+  model: string;
+  dims: number;
 }
 
-/**
- * Embed a single string with Gemini text-embedding-004. Returns 768 floats.
- * Throws a friendlyLLMError-style message on credential / quota failures.
- */
-export async function embedText(text: string): Promise<number[]> {
-  const apiKey = geminiEmbedKey();
-  if (!apiKey) throw new Error("Add a Gemini API key in Settings to enable semantic KB search.");
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBED_MODEL}:embedContent`;
+async function postEmbed(texts: string[]): Promise<number[][]> {
+  if (texts.length === 0) return [];
+  const url = `${backendUrl()}/api/v1/llm/embed`;
+  const jwt = await backendJwt();
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-    body: JSON.stringify({
-      content: { parts: [{ text }] },
-    }),
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt}`,
+    },
+    body: JSON.stringify({ texts, model: GEMINI_EMBED_MODEL }),
   });
   if (!res.ok) {
     const body = await res.text();
-    throw friendlyLLMError("Gemini embed", res.status, body);
+    throw friendlyLLMError("Gemini embed (proxy)", res.status, body);
   }
-  const data = (await res.json()) as { embedding?: { values?: number[] } };
-  const vec = data.embedding?.values;
+  const data = (await res.json()) as ProxyEmbedResponse;
+  if (!data.vectors || !Array.isArray(data.vectors)) {
+    throw new Error("Gemini embed proxy returned no vectors");
+  }
+  return data.vectors;
+}
+
+/**
+ * Embed a single string. Returns 768 floats.
+ * Throws a friendlyLLMError-style message on credential / quota failures.
+ */
+export async function embedText(text: string): Promise<number[]> {
+  const vecs = await postEmbed([text]);
+  const vec = vecs[0];
   if (!vec || !Array.isArray(vec)) throw new Error("Gemini embed returned no vector");
   return vec;
 }
 
 /**
- * Embed many strings. Gemini's batchEmbedContents accepts up to 100 requests
- * per call. We batch internally so callers can pass an arbitrary list.
+ * Embed many strings. Backend caps at 100 per call; we batch on the client
+ * side so callers don't need to know the limit.
  */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
-  const apiKey = geminiEmbedKey();
-  if (!apiKey) throw new Error("Add a Gemini API key in Settings to enable semantic KB search.");
   const out: number[][] = [];
   const BATCH = 100;
   for (let i = 0; i < texts.length; i += BATCH) {
     const slice = texts.slice(i, i + BATCH);
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_EMBED_MODEL}:batchEmbedContents`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
-        requests: slice.map((t) => ({
-          model: `models/${GEMINI_EMBED_MODEL}`,
-          content: { parts: [{ text: t }] },
-        })),
-      }),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw friendlyLLMError("Gemini embed", res.status, body);
-    }
-    const data = (await res.json()) as { embeddings?: { values?: number[] }[] };
-    const vecs = data.embeddings ?? [];
+    const vecs = await postEmbed(slice);
     for (const v of vecs) {
-      if (!v.values || !Array.isArray(v.values)) throw new Error("Gemini embed returned a malformed vector");
-      out.push(v.values);
+      if (!v || !Array.isArray(v)) throw new Error("Gemini embed returned a malformed vector");
+      out.push(v);
     }
   }
   return out;
 }
 
 export function makeLLMClient(cfg: LLMConfig): LLMClient {
+  // Anthropic / Gemini / Groq route through the backend proxy (#1).
+  // Custom / Ollama stay direct — see notes on each.
   const inner: LLMClient =
-    cfg.provider === "gemini"
-      ? new GeminiClient(cfg)
+    cfg.provider === "anthropic"
+      ? new ProxiedLLMClient("anthropic", cfg.model, "Claude")
+      : cfg.provider === "gemini"
+      ? new ProxiedLLMClient("gemini", cfg.model, "Gemini")
+      : cfg.provider === "groq"
+      ? new ProxiedLLMClient("groq", cfg.model, "Groq")
       : cfg.provider === "ollama"
       ? new OllamaClient(cfg)
-      : cfg.provider === "groq"
-      ? new GroqClient(cfg)
-      : cfg.provider === "custom"
-      ? new CustomOpenAICompatClient(cfg)
-      : new AnthropicClient(cfg);
+      : new CustomOpenAICompatClient(cfg);
   return {
     async call(system, user, maxTokens) {
       const out = await inner.call(system, user, maxTokens);
