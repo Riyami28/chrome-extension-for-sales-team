@@ -1,0 +1,138 @@
+/* =========================================================================
+   ZopDev · design tokens
+   -------------------------------------------------------------------------
+   One source of truth for color, type, spacing, motion, shadow, and radius.
+   Any file in /zopdev-site/ that isn't the homepage should import this and
+   build on top of it — never redefine these values locally.
+
+   Standing rules (enforced at audit):
+     · NO radial-gradient anywhere — hero glow blobs, CTA auras, analogy
+       washes, "section atmosphere" — none. The faded-orange/green/blue
+       glow pattern is explicitly banned. Depth comes from solid fills
+       and hard offset shadows.
+     · NO linear-gradient on components. The only exception is the
+       homepage body background — a 1px white-pixel grid wash at
+       rgba(255,255,255,0.025) on both axes. No other linear-gradient.
+     · NO filter:blur. Backdrop-filter blur is permitted on one element
+       only — the sticky nav on index.html — and nowhere else.
+     · No drop shadows with blur radius on components — hard offset only.
+     · border-radius: 0 globally. 9999px permitted only on status pills.
+
+   For the brand spec in prose, see /brand-guidelines.html.
+   For component patterns, see /styleguide.html.
+   ========================================================================= */
+
+
+/* =========================================================================
+   1 · COLOR — pillar palette
+   ========================================================================= */
+:root{
+  --zop-blue:   #2A4494;
+  --zop-orange: #F58549;
+  --zop-green:  #7FB236;
+  --zop-black:  #0A0A0A;
+  --zop-cream:  #F0EBDB;
+
+  --logo-blue-on-dark: #4A66D4;
+
+  --bg-0: #060608;
+  --bg-1: #0E0E12;
+  --bg-2: #15151A;
+  --bg-3: #1C1C24;
+  --bg-4: #252530;
+
+  --ink:    #F0EBDB;
+  --ink-2:  #D4CDB5;
+  --ink-3:  #A8A195;
+  --ink-4:  #8A8378;
+  --ink-5:  #5A5A62;
+
+  --line:   #2A2A34;
+  --line-2: #3A3A46;
+  --line-b: #55555E;
+
+  --blue-tint:   rgba(42,68,148,0.14);
+  --orange-tint: rgba(245,133,73,0.14);
+  --green-tint:  rgba(127,178,54,0.16);
+
+  --ok:   #34d399;
+  --warn: #FBBF24;
+  --err:  #F87171;
+
+  /* 2 · TYPE */
+  --font: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --fw-light: 300; --fw-regular: 400; --fw-medium: 500;
+  --fw-semibold: 600; --fw-bold: 700;
+
+  --t-10:10px; --t-11:11px; --t-12:12px; --t-13:13px; --t-14:14px;
+  --t-15:15px; --t-17:17px; --t-20:20px; --t-22:22px; --t-24:24px;
+  --t-26:26px; --t-28:28px; --t-32:32px; --t-36:36px; --t-44:44px;
+  --t-48:48px; --t-52:52px; --t-60:60px; --t-64:64px; --t-72:72px; --t-96:96px;
+
+  --lh-display:0.95; --lh-heading:1.05; --lh-body:1.55;
+  --lh-tight:1.35; --lh-loose:1.6;
+
+  --ls-body:-0.02em; --ls-heading:-0.03em; --ls-display:-0.05em;
+  --ls-meta:0.14em; --ls-meta-tight:0.04em; --ls-meta-wide:0.22em;
+
+  /* 3 · SPACING — 4px grid */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:20px;
+  --sp-6:24px; --sp-7:28px; --sp-8:32px; --sp-10:40px; --sp-12:48px;
+  --sp-14:56px; --sp-16:64px; --sp-18:72px; --sp-20:80px;
+  --sp-22:88px; --sp-24:96px; --sp-30:120px;
+
+  --sec-pad:88px; --sec-pad-lg:96px; --sec-pad-xl:120px; --sec-pad-sm:56px;
+  --max:1400px; --gutter:32px;
+
+  /* 4 · RADIUS */
+  --r-sharp:0; --r-pill:9999px;
+
+  /* 5 · DEPTH — hard offset shadows only */
+  --shadow-hover-orange: 0 8px 0 -4px var(--zop-orange);
+  --shadow-hover-blue:   0 8px 0 -4px var(--zop-blue);
+  --shadow-hover-green:  0 8px 0 -4px var(--zop-green);
+  --shadow-hover-ink:    0 4px 0 -2px var(--ink);
+  --shadow-toast:        0 8px 0 -4px var(--zop-orange);
+
+  /* 6 · MOTION */
+  --dur-fast:160ms; --dur-med:250ms; --dur-slow:400ms; --dur-xslow:520ms;
+  --ease-out:    cubic-bezier(.22, 1, .36, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --ease-spring: cubic-bezier(.175, .885, .32, 1.275);
+  --ease-snap:   cubic-bezier(.19, 1, .22, 1);
+
+  /* 7 · Z-INDEX */
+  --z-nav:50; --z-toast:100; --z-modal:200;
+}
+
+/* 8 · GLOBAL RESET + BASE TYPOGRAPHY */
+*,*::before,*::after{ box-sizing: border-box; border-radius: var(--r-sharp); }
+html{ scroll-behavior: smooth; }
+body{
+  margin:0; font-family: var(--font);
+  background: var(--bg-0); color: var(--ink);
+  font-size: var(--t-15); line-height: var(--lh-body); letter-spacing: var(--ls-body);
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss01" 0, "tnum" 1;
+}
+img, svg{ display:block; max-width:100%; }
+a{ color:inherit; text-decoration:none; }
+h1,h2,h3,h4{ margin:0; letter-spacing: var(--ls-heading); font-weight: var(--fw-bold); line-height: var(--lh-heading); }
+code, .mono{ font-family: var(--mono); letter-spacing:0; font-variant-numeric: tabular-nums; }
+button{ font-family: inherit; cursor: pointer; border: 0; background: none; letter-spacing: inherit; }
+.num{ font-variant-numeric: tabular-nums; }
+
+/* 9 · REDUCED MOTION */
+@media (prefers-reduced-motion: reduce){
+  *, *::before, *::after{
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* 10 · UTILITY */
+.container{ max-width: var(--max); margin: 0 auto; padding: 0 var(--gutter); position: relative; }

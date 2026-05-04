@@ -1,0 +1,106 @@
+{
+  "manifest_version": 3,
+  "name": "ClientLens – Sales Copilot",
+  "version": "1.0.0",
+  "description": "Live meeting copilot for sales — pitch generation, objection handling, on-screen transponder, and manual Zoho / Meet / Zoom integrations.",
+
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "permissions": [
+    "activeTab",
+    "storage",
+    "identity",
+    "scripting",
+    "sidePanel",
+    "tabs",
+    "notifications",
+    "contextMenus",
+    "tabCapture",
+    "offscreen"
+  ],
+
+  "host_permissions": [
+    "https://docs.google.com/*",
+    "https://slides.google.com/*",
+    "https://www.notion.so/*",
+    "https://www.linkedin.com/*",
+    "https://*.supabase.co/*",
+    "https://your-backend.railway.app/*",
+    "https://api.groq.com/*",
+    "https://api.anthropic.com/*",
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.deepgram.com/*",
+    "wss://api.deepgram.com/*",
+    "https://www.googleapis.com/*",
+    "https://*.zohoapis.com/*",
+    "https://*.zohoapis.in/*",
+    "https://*.zohoapis.eu/*",
+    "https://accounts.zoho.com/*",
+    "https://accounts.zoho.in/*",
+    "https://accounts.zoho.eu/*",
+    "https://meet.google.com/*",
+    "http://localhost:11434/*",
+    "https://logo.clearbit.com/*",
+    "https://www.google.com/*",
+    "https://icons.duckduckgo.com/*",
+    "<all_urls>"
+  ],
+
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://meet.google.com/*"],
+      "js": ["meet-transponder.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "side_panel": {
+    "default_path": "sidebar.html"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+
+  "web_accessible_resources": [
+    {
+      "resources": ["*.js", "*.css", "*.png", "*.svg"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+
+  "oauth2": {
+    "client_id": "YOUR_GOOGLE_CLIENT_ID",
+    "scopes": [
+      "openid",
+      "email",
+      "profile",
+      "https://www.googleapis.com/auth/presentations",
+      "https://www.googleapis.com/auth/drive.file",
+      "https://www.googleapis.com/auth/documents",
+      "https://www.googleapis.com/auth/calendar.readonly",
+      "https://www.googleapis.com/auth/calendar.events.readonly"
+    ]
+  }
+}

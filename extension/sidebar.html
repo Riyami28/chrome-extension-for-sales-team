@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ClientLens</title>
+  <link rel="icon" type="image/png" sizes="128x128" href="icons/icon128.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="icons/icon32.png" />
+  <link rel="icon" type="image/png" sizes="16x16" href="icons/icon16.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    rel="stylesheet"
+    href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+  />
+  <style>
+    /* ZopDev tokens.css — standing rules applied globally here */
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      border-radius: 0;
+    }
+    html, body {
+      font-family: 'Space Grotesk', system-ui, -apple-system, sans-serif;
+      letter-spacing: -0.02em;
+      width: 100%;
+      height: 100%;
+    }
+    body {
+      /* Fill whatever width the Chrome side panel / detached window gives us.
+         Chrome's minimum side-panel width is ~320px; above that the UI reflows
+         fluidly as the user drags the panel edge. */
+      width: 100%;
+      min-width: 320px;
+      min-height: 100vh;
+      background: #060608;
+      color: #F0EBDB;
+      overflow-x: hidden;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    #root { width: 100%; height: 100vh; }
+    code, .mono, pre {
+      font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+      letter-spacing: 0;
+      font-variant-numeric: tabular-nums;
+    }
+    .num { font-variant-numeric: tabular-nums; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="module" src="/src/sidebar/main.tsx"></script>
+</body>
+</html>
