@@ -24,6 +24,12 @@ export interface IntegrationConfig {
 
 export interface UserSettings {
   provider: LLMProvider;
+  /**
+   * @deprecated since #1 — Anthropic is routed through the FastAPI backend.
+   * The extension never holds an Anthropic key. Field kept to avoid breaking
+   * older hydrated payloads; ignored on read. Will be removed in a follow-up
+   * after the migration window.
+   */
   anthropicKey: string;
   geminiKey: string;
   groqKey: string;
@@ -194,7 +200,8 @@ export function lockAdmin(): void {
 
 export function apiKeyFor(provider: LLMProvider): string {
   const s = getSettings();
-  if (provider === "anthropic") return s.anthropicKey;
+  // Anthropic is proxied via the backend (#1) — extension never holds the key.
+  if (provider === "anthropic") return "";
   if (provider === "gemini") return s.geminiKey;
   if (provider === "groq") return s.groqKey;
   if (provider === "custom") return s.customKey;

@@ -41,7 +41,7 @@ await build({
     "import.meta.env.VITE_GEMINI_API_KEY": '"fake-key"',
     "import.meta.env.VITE_GEMINI_MODEL": '"gemini-2.0-flash"',
   },
-  external: ["@anthropic-ai/sdk"],
+  external: [],
   logLevel: "error",
 });
 

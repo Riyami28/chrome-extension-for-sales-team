@@ -1,9 +1,15 @@
 /**
  * Provider-agnostic LLM client. Picks Anthropic or Groq based on
  * VITE_LLM_PROVIDER. Both return plain text; council parses JSON out.
+ *
+ * Anthropic is routed through the FastAPI backend (`/api/v1/llm/{complete,stream}`)
+ * because the SDK requires `dangerouslyAllowBrowser` and the API key must
+ * never live in `chrome.storage`. See issue #1 and `backend/api/routes/llm.py`.
+ *
+ * Other providers (Gemini / Groq / Ollama / Custom) still call directly. They
+ * are tracked in the same issue for follow-up migration.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
 import { bumpUsage, getSettings } from "../utils/settings-storage";
 
 export type LLMProvider = "anthropic" | "groq" | "ollama" | "gemini" | "custom";
@@ -91,9 +97,10 @@ export function resolveLLMConfig(override?: { provider: LLMProvider; model: stri
     return { provider, apiKey, model, baseUrl };
   }
 
-  const apiKey = settings.anthropicKey || envKey("VITE_ANTHROPIC_API_KEY");
-  if (!apiKey) return { error: "Add an Anthropic API key in Settings." };
-  return { provider: "anthropic", apiKey, model: modelOverride ?? ANTHROPIC_MODEL };
+  // Anthropic routes through the backend proxy — no extension-side API key needed.
+  // The (now-deprecated) `anthropicKey` setting is ignored; backend env owns the key.
+  // We keep the provider entry for council selection but apiKey is intentionally empty.
+  return { provider: "anthropic", apiKey: "", model: modelOverride ?? ANTHROPIC_MODEL };
 }
 
 export interface LLMClient {
@@ -109,49 +116,150 @@ export interface LLMClient {
   ): Promise<string>;
 }
 
-class AnthropicClient implements LLMClient {
-  private client: Anthropic;
-  constructor(private cfg: LLMConfig) {
-    this.client = new Anthropic({ apiKey: cfg.apiKey, dangerouslyAllowBrowser: true });
+// ── Backend proxy helpers ────────────────────────────────────────────────────
+//
+// The extension never holds an Anthropic API key. All Anthropic traffic flows
+// through the FastAPI backend at `${BACKEND_URL}/api/v1/llm/{complete,stream}`,
+// authenticated with the user's Supabase JWT. See `backend/api/routes/llm.py`.
+
+function backendUrl(): string {
+  const url = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.replace(/\/$/, "");
+  if (!url) {
+    throw new Error(
+      "VITE_BACKEND_URL is not configured. The extension can't reach the backend LLM proxy. " +
+        "Set it in extension/.env (e.g. VITE_BACKEND_URL=http://localhost:8000).",
+    );
   }
-  async call(system: string, user: string, maxTokens: number): Promise<string> {
-    try {
-      const res = await this.client.messages.create({
-        model: this.cfg.model,
-        max_tokens: maxTokens,
-        system,
-        messages: [{ role: "user", content: user }],
-      });
-      return res.content[0]?.type === "text" ? res.content[0].text : "";
-    } catch (err) {
-      const anyErr = err as { status?: number; message?: string };
-      throw friendlyLLMError("Claude", anyErr.status ?? 0, anyErr.message ?? String(err));
+  return url;
+}
+
+async function backendJwt(): Promise<string> {
+  // Lazy-import Supabase so unrelated provider code paths (Gemini / Groq /
+  // smoke tests) don't require a real Supabase URL at module load.
+  const { supabase } = await import("../utils/supabase");
+  const { data } = await supabase.auth.getSession();
+  const token = data?.session?.access_token;
+  if (!token) {
+    throw new Error("Sign in with Google to use Claude. The session is missing a Supabase JWT.");
+  }
+  return token;
+}
+
+/**
+ * Parse a fetch Response body as Server-Sent Events. Yields one frame per
+ * `\n\n`-separated chunk. Each frame is `{ event, data }`.
+ *
+ * Manual parser because EventSource doesn't support POST + custom headers,
+ * which we need for the JWT and the request body.
+ */
+async function* readSSE(
+  res: Response,
+): AsyncGenerator<{ event: string; data: string }, void, void> {
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let sep = buf.indexOf("\n\n");
+      while (sep !== -1) {
+        const frame = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let event = "message";
+        const dataLines: string[] = [];
+        for (const line of frame.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (dataLines.length > 0) yield { event, data: dataLines.join("\n") };
+        sep = buf.indexOf("\n\n");
+      }
     }
+  } finally {
+    reader.releaseLock();
   }
+}
+
+class AnthropicClient implements LLMClient {
+  constructor(private cfg: LLMConfig) {}
+
+  async call(system: string, user: string, maxTokens: number): Promise<string> {
+    const url = `${backendUrl()}/api/v1/llm/complete`;
+    const jwt = await backendJwt();
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        provider: "anthropic",
+        model: this.cfg.model,
+        system,
+        user,
+        max_tokens: maxTokens,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw friendlyLLMError("Claude (proxy)", res.status, body);
+    }
+    const data = (await res.json()) as { text?: string };
+    return data.text ?? "";
+  }
+
   async callStream(
     system: string,
     user: string,
     maxTokens: number,
     onDelta: (delta: string, full: string) => void,
   ): Promise<string> {
-    try {
-      let full = "";
-      const stream = this.client.messages.stream({
+    const url = `${backendUrl()}/api/v1/llm/stream`;
+    const jwt = await backendJwt();
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+      },
+      body: JSON.stringify({
+        provider: "anthropic",
         model: this.cfg.model,
-        max_tokens: maxTokens,
         system,
-        messages: [{ role: "user", content: user }],
-      });
-      stream.on("text", (delta: string) => {
-        full += delta;
-        try { onDelta(delta, full); } catch { /* listener errors must not abort the stream */ }
-      });
-      await stream.finalMessage();
-      return full;
-    } catch (err) {
-      const anyErr = err as { status?: number; message?: string };
-      throw friendlyLLMError("Claude", anyErr.status ?? 0, anyErr.message ?? String(err));
+        user,
+        max_tokens: maxTokens,
+      }),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw friendlyLLMError("Claude (proxy)", res.status, body);
     }
+
+    let full = "";
+    for await (const frame of readSSE(res)) {
+      if (frame.event === "delta") {
+        try {
+          const { text } = JSON.parse(frame.data) as { text?: string };
+          if (text) {
+            full += text;
+            try { onDelta(text, full); } catch { /* listener errors must not abort the stream */ }
+          }
+        } catch { /* malformed delta — skip */ }
+      } else if (frame.event === "error") {
+        try {
+          const { error } = JSON.parse(frame.data) as { error?: string };
+          throw friendlyLLMError("Claude (proxy)", 0, error ?? "Unknown SSE error");
+        } catch (err) {
+          if (err instanceof Error) throw err;
+          throw new Error("Claude (proxy) stream errored");
+        }
+      }
+      // `done` is informational — nothing to do client-side.
+    }
+    return full;
   }
 }
 

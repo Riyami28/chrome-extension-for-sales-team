@@ -1,10 +1,14 @@
 /**
  * Mock API for local preview/testing.
- * Simulates the backend streaming pipeline using Claude directly from the extension.
+ * Simulates the backend streaming pipeline using Claude via the FastAPI proxy.
  * Toggle via VITE_MOCK_MODE=true in .env.local
+ *
+ * Note: as of issue #1, Anthropic calls go through the backend proxy
+ * (`/api/v1/llm/complete`) — not direct from the extension. Mock mode requires
+ * the backend to be reachable at VITE_BACKEND_URL.
  */
 
-import Anthropic from "@anthropic-ai/sdk";
+import { makeLLMClient, resolveLLMConfig } from "../agents/llm-client";
 import type { GenerationRequest, PipelineResult } from "../types";
 
 const STAGES = [
@@ -17,8 +21,12 @@ const STAGES = [
 
 export async function* mockGenerate(
   request: GenerationRequest,
-  apiKey: string
+  // The previous direct-SDK signature took an `apiKey` here. The proxy
+  // owns the key, so callers no longer pass one. Kept for backwards-compat
+  // call sites; ignored.
+  _unused?: string,
 ): AsyncGenerator<{ type: string; stage?: string; data?: unknown; message?: string }> {
+  void _unused;
 
   // Stream fake progress stages
   for (const { stage, delay } of STAGES) {
@@ -26,20 +34,17 @@ export async function* mockGenerate(
     yield { type: "progress", stage };
   }
 
-  // Call Claude directly for the actual generation
-  const client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-
+  // Call Claude via the backend proxy (no API key in the extension).
+  const cfg = resolveLLMConfig({ provider: "anthropic", model: "claude-sonnet-4-6" });
+  if ("error" in cfg) {
+    yield { type: "error", message: cfg.error };
+    return;
+  }
+  const client = makeLLMClient(cfg);
   const prompt = buildPrompt(request);
 
   try {
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4000,
-      system: MOCK_SYSTEM_PROMPT,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const rawText = response.content[0].type === "text" ? response.content[0].text : "";
+    const rawText = await client.call(MOCK_SYSTEM_PROMPT, prompt, 4000);
 
     // Parse JSON from response
     const jsonMatch = rawText.match(/```json\n?([\s\S]+?)\n?```/) || rawText.match(/(\{[\s\S]+\})/);
