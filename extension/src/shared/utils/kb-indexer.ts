@@ -7,7 +7,7 @@
  * transformation was deliberately skipped — pure semantic retrieval.
  */
 
-import type { KBEntry, KBChunk } from "../types";
+import type { KBChunk } from "../types";
 import { semanticChunk } from "./chunker";
 import { embedTexts } from "../agents/llm-client";
 import { listKB, updateKB } from "./kb-storage";

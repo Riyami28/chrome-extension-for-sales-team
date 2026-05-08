@@ -28,12 +28,6 @@ const OLLAMA_BASE = "http://localhost:11434";
 const GEMINI_MODEL = "gemini-2.0-flash";
 const GEMINI_EMBED_MODEL = "text-embedding-004"; // 768 dims, free tier
 
-function envKey(name: string): string {
-  const v = (import.meta.env as Record<string, string | undefined>)[name] ?? "";
-  if (!v || v.includes("YOUR_KEY")) return "";
-  return v;
-}
-
 /**
  * Translate a raw upstream error body into a concise user-facing message.
  * Credential / quota / rate-limit failures get a hint pointing to Settings;

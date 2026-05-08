@@ -397,12 +397,3 @@ export function bgAppendTranscript(seg: TranscriptSegment): void {
   // paused, which is exactly when fresh coaching is most useful.
   if (seg.is_final && seg.text?.trim()) scheduleLiveTrigger();
 }
-
-export function bgUpdateAgenda(items: AgendaItem[]): void {
-  if (!active) return;
-  active.session.agenda = items;
-}
-
-export function bgIsActive(): boolean {
-  return active !== null;
-}
