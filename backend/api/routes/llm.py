@@ -112,6 +112,15 @@ def _groq_key() -> str:
     return settings.groq_api_key
 
 
+def _openrouter_key() -> str:
+    if not settings.openrouter_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="OPENROUTER_API_KEY is not configured on the backend.",
+        )
+    return settings.openrouter_api_key
+
+
 # ── Usage logging (best-effort) ──────────────────────────────────────────────
 
 
@@ -518,6 +527,140 @@ async def _stream_groq(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
         )
 
 
+# ── OpenRouter dispatch (OpenAI-compatible chat completions) ─────────────────
+#
+# OpenRouter is a gateway. Same wire format as Groq, but model IDs are
+# namespaced (e.g. `meta-llama/llama-3.3-70b-instruct:free`). We skip
+# `response_format: json_object` here because not every routed model supports
+# it; the council code already parses JSON from prose/fenced blocks. The system
+# prompt still nudges JSON-only output to keep parser hit-rate high.
+
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+
+
+def _openrouter_headers(api_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        # App attribution — visible on openrouter.ai/activity. Optional.
+        "HTTP-Referer": settings.openrouter_referer,
+        "X-Title": settings.openrouter_title,
+    }
+
+
+def _openrouter_body(req: LLMRequest, *, stream: bool = False) -> dict:
+    return {
+        "model": req.model,
+        "max_tokens": req.max_tokens,
+        "temperature": req.temperature if req.temperature is not None else 0.3,
+        "stream": stream,
+        "messages": [
+            {
+                "role": "system",
+                "content": f"{req.system or ''}\nRespond with a single JSON object. No prose, no markdown fences.".strip(),
+            },
+            {"role": "user", "content": req.user},
+        ],
+    }
+
+
+async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
+    api_key = _openrouter_key()
+    res = await _http().post(
+        OPENROUTER_URL,
+        headers=_openrouter_headers(api_key),
+        json=_openrouter_body(req),
+    )
+    if res.status_code >= 400:
+        raise HTTPException(status_code=res.status_code, detail=f"OpenRouter {res.status_code}: {res.text[:300]}")
+    data = res.json()
+    text = ""
+    choices = data.get("choices") or []
+    if choices:
+        text = choices[0].get("message", {}).get("content", "") or ""
+    usage = data.get("usage") or {}
+    return LLMResponse(
+        text=text,
+        model=data.get("model", req.model),
+        usage=LLMUsage(
+            input_tokens=usage.get("prompt_tokens", 0),
+            output_tokens=usage.get("completion_tokens", 0),
+        ),
+        request_id=data.get("id"),
+    )
+
+
+async def _stream_openrouter(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
+    """OpenRouter SSE re-emit. Standard OpenAI chunked SSE."""
+    api_key = _openrouter_key()
+    input_tokens = 0
+    output_tokens = 0
+    request_id: Optional[str] = None
+    error_msg: Optional[str] = None
+    started = time.perf_counter()
+
+    try:
+        async with _http().stream(
+            "POST",
+            OPENROUTER_URL,
+            headers=_openrouter_headers(api_key),
+            json=_openrouter_body(req, stream=True),
+        ) as res:
+            if res.status_code >= 400:
+                body = await res.aread()
+                error_msg = f"openrouter_status_{res.status_code}: {body[:300].decode(errors='replace')}"
+                yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+                return
+
+            async for line in res.aiter_lines():
+                if not line or not line.startswith("data:"):
+                    continue
+                payload = line[5:].strip()
+                if payload == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                request_id = chunk.get("id") or request_id
+                choices = chunk.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta", {}).get("content")
+                    if delta:
+                        yield f"event: delta\ndata: {json.dumps({'text': delta})}\n\n".encode()
+                usage = chunk.get("usage")
+                if usage:
+                    input_tokens = usage.get("prompt_tokens", input_tokens)
+                    output_tokens = usage.get("completion_tokens", output_tokens)
+
+        done = json.dumps(
+            {
+                "model": req.model,
+                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+                "request_id": request_id,
+            }
+        )
+        yield f"event: done\ndata: {done}\n\n".encode()
+    except httpx.HTTPError as e:
+        error_msg = f"openrouter_http_error: {e}"
+        yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+    finally:
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        asyncio.create_task(
+            _log_usage(
+                user_id=user_id,
+                provider=req.provider,
+                model=req.model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                duration_ms=elapsed_ms,
+                streamed=True,
+                request_id=request_id,
+                error=error_msg,
+            )
+        )
+
+
 # ── Embeddings (Gemini text-embedding-004) ───────────────────────────────────
 
 
@@ -537,7 +680,7 @@ class EmbedResponse(BaseModel):
 # ── Public endpoints ─────────────────────────────────────────────────────────
 
 
-_PROXIED_PROVIDERS = {"anthropic", "gemini", "groq"}
+_PROXIED_PROVIDERS = {"anthropic", "gemini", "groq", "openrouter"}
 
 
 def _reject_unproxied(provider: str) -> None:
@@ -591,6 +734,8 @@ async def complete(request: Request, body: LLMRequest) -> LLMResponse:
             response = await _complete_gemini(body)
         elif body.provider == "groq":
             response = await _complete_groq(body)
+        elif body.provider == "openrouter":
+            response = await _complete_openrouter(body)
         else:
             # Unreachable — _reject_unproxied above guards this.
             raise HTTPException(status_code=500, detail="provider dispatch fell through")
@@ -644,6 +789,8 @@ async def stream(request: Request, body: LLMRequest) -> StreamingResponse:
         gen = _stream_gemini(body, user["id"])
     elif body.provider == "groq":
         gen = _stream_groq(body, user["id"])
+    elif body.provider == "openrouter":
+        gen = _stream_openrouter(body, user["id"])
     else:
         # Unreachable — _reject_unproxied above guards this.
         raise HTTPException(status_code=500, detail="provider dispatch fell through")
@@ -756,5 +903,6 @@ async def llm_health() -> dict:
         "anthropic_key_configured": bool(settings.anthropic_api_key),
         "gemini_key_configured": bool(settings.gemini_api_key),
         "groq_key_configured": bool(settings.groq_api_key),
+        "openrouter_key_configured": bool(settings.openrouter_api_key),
         "embed_endpoint": "/api/v1/llm/embed",
     }

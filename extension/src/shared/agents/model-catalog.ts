@@ -46,6 +46,27 @@ export const MODEL_CATALOG: ModelOption[] = [
     tier: "free",
     note: "Free · 12k TPM limit · stronger reasoning",
   },
+  {
+    provider: "openrouter",
+    model: "openai/gpt-oss-20b:free",
+    label: "GPT-OSS 20B (OpenRouter)",
+    tier: "free",
+    note: "Free · OpenAI open-source · validated in smoke test",
+  },
+  {
+    provider: "openrouter",
+    model: "meta-llama/llama-3.3-70b-instruct:free",
+    label: "Llama 3.3 70B (OpenRouter)",
+    tier: "free",
+    note: "Free · OpenRouter gateway · often rate-limited",
+  },
+  {
+    provider: "openrouter",
+    model: "deepseek/deepseek-chat:free",
+    label: "DeepSeek Chat (OpenRouter)",
+    tier: "free",
+    note: "Free · strong reasoning · OpenRouter free pool",
+  },
 
   // ─── PREMIUM ──────────────────────────────────────
   {
@@ -82,6 +103,20 @@ export const MODEL_CATALOG: ModelOption[] = [
     label: "Claude Opus 4.7",
     tier: "premium",
     note: "Paid · highest quality, slowest",
+  },
+  {
+    provider: "openrouter",
+    model: "openai/gpt-4o-mini",
+    label: "GPT-4o mini (OpenRouter)",
+    tier: "cheap",
+    note: "Paid · cheap · OpenRouter gateway",
+  },
+  {
+    provider: "openrouter",
+    model: "anthropic/claude-3.5-sonnet",
+    label: "Claude 3.5 Sonnet (OpenRouter)",
+    tier: "premium",
+    note: "Paid · routed via OpenRouter (use direct Anthropic for lower latency)",
   },
 ];
 

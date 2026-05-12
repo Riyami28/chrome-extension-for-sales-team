@@ -30,6 +30,10 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    # Local dev: also allow any chrome-extension:// caller and any localhost
+    # port. Extension IDs differ per unpacked load, so an explicit allow_origins
+    # list is impractical until the build is uploaded to the Chrome Web Store.
+    allow_origin_regex=r"^(chrome-extension://[a-z]{32}|http://localhost:\d+)$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

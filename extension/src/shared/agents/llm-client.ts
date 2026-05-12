@@ -12,7 +12,7 @@
 
 import { bumpUsage, getSettings } from "../utils/settings-storage";
 
-export type LLMProvider = "anthropic" | "groq" | "ollama" | "gemini" | "custom";
+export type LLMProvider = "anthropic" | "groq" | "ollama" | "gemini" | "openrouter" | "custom";
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -27,6 +27,9 @@ const OLLAMA_MODEL = "llama3.1:8b";
 const OLLAMA_BASE = "http://localhost:11434";
 const GEMINI_MODEL = "gemini-2.0-flash";
 const GEMINI_EMBED_MODEL = "text-embedding-004"; // 768 dims, free tier
+// OpenRouter model IDs are namespaced (`vendor/model[:tag]`). Default to a
+// free-tier Llama; users override via Settings or the ModelPicker.
+const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
 /**
  * Translate a raw upstream error body into a concise user-facing message.
@@ -80,6 +83,11 @@ export function resolveLLMConfig(override?: { provider: LLMProvider; model: stri
     return { provider, apiKey: "", model: modelOverride ?? GROQ_MODEL };
   }
 
+  if (provider === "openrouter") {
+    // Proxied via backend — no extension-side key. Backend env owns OPENROUTER_API_KEY.
+    return { provider, apiKey: "", model: modelOverride ?? import.meta.env.VITE_OPENROUTER_MODEL ?? OPENROUTER_MODEL };
+  }
+
   if (provider === "custom") {
     const apiKey = settings.customKey;
     const baseUrl = settings.customBaseUrl;
@@ -126,6 +134,13 @@ function backendUrl(): string {
 }
 
 async function backendJwt(): Promise<string> {
+  // Local dev bypass: extension's chrome.identity sign-in doesn't produce a
+  // Supabase JWT (auth-wiring gap in the original code), so when
+  // VITE_DEV_MODE=true we send a stub bearer and the backend's AuthMiddleware
+  // (with DEV_MODE=true) accepts it.
+  if ((import.meta.env.VITE_DEV_MODE as string | undefined) === "true") {
+    return "dev-mode-bypass";
+  }
   // Lazy-import Supabase so unrelated provider code paths (Gemini / Groq /
   // smoke tests) don't require a real Supabase URL at module load.
   const { supabase } = await import("../utils/supabase");
@@ -182,7 +197,7 @@ async function* readSSE(
  * direct-only — see `makeLLMClient` for dispatch.
  */
 class ProxiedLLMClient implements LLMClient {
-  constructor(private provider: "anthropic" | "gemini" | "groq", private model: string, private label: string) {}
+  constructor(private provider: "anthropic" | "gemini" | "groq" | "openrouter", private model: string, private label: string) {}
 
   async call(system: string, user: string, maxTokens: number): Promise<string> {
     const url = `${backendUrl()}/api/v1/llm/complete`;
@@ -400,6 +415,8 @@ export function makeLLMClient(cfg: LLMConfig): LLMClient {
       ? new ProxiedLLMClient("gemini", cfg.model, "Gemini")
       : cfg.provider === "groq"
       ? new ProxiedLLMClient("groq", cfg.model, "Groq")
+      : cfg.provider === "openrouter"
+      ? new ProxiedLLMClient("openrouter", cfg.model, "OpenRouter")
       : cfg.provider === "ollama"
       ? new OllamaClient(cfg)
       : new CustomOpenAICompatClient(cfg);

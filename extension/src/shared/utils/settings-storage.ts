@@ -83,7 +83,8 @@ const SUPERSEDED_GEMINI_KEYS: readonly string[] = [];
 const SUPERSEDED_CUSTOM_KEYS = [DEAD_OPENROUTER_KEY] as const;
 
 const DEFAULTS: UserSettings = {
-  provider: "custom",
+  // Default to OpenRouter for local dev — proxied via backend, no extension key.
+  provider: "openrouter",
   anthropicKey: "",
   geminiKey: GEMINI_PRESET_KEY,
   groqKey: "",
