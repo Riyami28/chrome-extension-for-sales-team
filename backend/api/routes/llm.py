@@ -537,6 +537,10 @@ async def _stream_groq(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
+# Free-tier OpenRouter rate limits recover in ~10s. We retry up to 2 times
+# with a short sleep rather than immediately surfacing a 429 to the user.
+_OR_RETRY_DELAYS = [5, 12]  # seconds before 1st and 2nd retry
+
 
 def _openrouter_headers(api_key: str) -> dict:
     return {
@@ -565,13 +569,23 @@ def _openrouter_body(req: LLMRequest, *, stream: bool = False) -> dict:
 
 
 async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
+    import asyncio as _asyncio
     import uuid as _uuid
     api_key = _openrouter_key()
-    res = await _http().post(
-        OPENROUTER_URL,
-        headers=_openrouter_headers(api_key),
-        json=_openrouter_body(req),
-    )
+    res = None
+    for attempt, delay in enumerate([0] + _OR_RETRY_DELAYS):
+        if delay:
+            log.info("openrouter.retry", attempt=attempt, delay_s=delay, model=req.model)
+            await _asyncio.sleep(delay)
+        res = await _http().post(
+            OPENROUTER_URL,
+            headers=_openrouter_headers(api_key),
+            json=_openrouter_body(req),
+        )
+        if res.status_code != 429:
+            break
+        log.warning("openrouter.rate_limited", attempt=attempt, model=req.model)
+    assert res is not None
     if res.status_code >= 400:
         req_id = str(_uuid.uuid4())
         # Log full upstream body server-side; never echo it to the client —
@@ -604,7 +618,13 @@ async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
 
 
 async def _stream_openrouter(req: LLMRequest, user_id: str) -> AsyncIterator[bytes]:
-    """OpenRouter SSE re-emit. Standard OpenAI chunked SSE."""
+    """OpenRouter SSE re-emit. Standard OpenAI chunked SSE.
+
+    Retries up to 2 times on 429 with short sleeps before opening the stream,
+    so transient free-tier rate limits don't surface as errors to the client.
+    """
+    import asyncio as _asyncio
+    import uuid as _uuid
     api_key = _openrouter_key()
     input_tokens = 0
     output_tokens = 0
@@ -612,74 +632,63 @@ async def _stream_openrouter(req: LLMRequest, user_id: str) -> AsyncIterator[byt
     error_msg: Optional[str] = None
     started = time.perf_counter()
 
-    try:
-        async with _http().stream(
-            "POST",
+    # Pre-flight 429 check: send a non-streaming probe first so we can
+    # retry the rate limit before opening the SSE stream (can't re-open
+    # a generator mid-flight once yielding has started).
+    for attempt, delay in enumerate([0] + _OR_RETRY_DELAYS):
+        if delay:
+            log.info("openrouter.stream_retry", attempt=attempt, delay_s=delay, model=req.model)
+            await _asyncio.sleep(delay)
+        probe = await _http().post(
             OPENROUTER_URL,
             headers=_openrouter_headers(api_key),
-            json=_openrouter_body(req, stream=True),
-        ) as res:
-            if res.status_code >= 400:
-                import uuid as _uuid
-                body = await res.aread()
-                req_id = str(_uuid.uuid4())
-                # Log full body server-side; send only a request_id to client.
-                log.warning(
-                    "openrouter.stream_upstream_error",
-                    status=res.status_code,
-                    body=body[:500].decode(errors="replace"),
-                    request_id=req_id,
-                )
-                error_msg = f"openrouter_status_{res.status_code}"
-                yield f"event: error\ndata: {json.dumps({'error': 'upstream_error', 'request_id': req_id})}\n\n".encode()
-                return
-
-            async for line in res.aiter_lines():
-                if not line or not line.startswith("data:"):
-                    continue
-                payload = line[5:].strip()
-                if payload == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-                request_id = chunk.get("id") or request_id
-                choices = chunk.get("choices") or []
-                if choices:
-                    delta = choices[0].get("delta", {}).get("content")
-                    if delta:
-                        yield f"event: delta\ndata: {json.dumps({'text': delta})}\n\n".encode()
-                usage = chunk.get("usage")
-                if usage:
-                    input_tokens = usage.get("prompt_tokens", input_tokens)
-                    output_tokens = usage.get("completion_tokens", output_tokens)
-
-        done = json.dumps(
-            {
-                "model": req.model,
-                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
-                "request_id": request_id,
-            }
+            json=_openrouter_body(req),  # non-streaming probe
         )
+        if probe.status_code != 429:
+            break
+        log.warning("openrouter.stream_rate_limited", attempt=attempt, model=req.model)
+    else:
+        # All retries exhausted on 429 — surface it as an SSE error event.
+        req_id = str(_uuid.uuid4())
+        log.warning("openrouter.stream_rate_limited_fatal", model=req.model, request_id=req_id)
+        yield f"event: error\ndata: {json.dumps({'error': 'upstream_error', 'request_id': req_id})}\n\n".encode()
+        return
+
+    # If the probe itself returned a non-429 error, surface it.
+    if probe.status_code >= 400:
+        req_id = str(_uuid.uuid4())
+        log.warning("openrouter.stream_upstream_error", status=probe.status_code,
+                    body=probe.text[:500], request_id=req_id)
+        yield f"event: error\ndata: {json.dumps({'error': 'upstream_error', 'request_id': req_id})}\n\n".encode()
+        return
+
+    # Probe succeeded — use its response directly (avoids a second round-trip).
+    try:
+        data = probe.json()
+        choices = data.get("choices") or []
+        text = choices[0].get("message", {}).get("content", "") if choices else ""
+        usage_d = data.get("usage") or {}
+        input_tokens = usage_d.get("prompt_tokens", 0)
+        output_tokens = usage_d.get("completion_tokens", 0)
+        request_id = data.get("id")
+        if text:
+            yield f"event: delta\ndata: {json.dumps({'text': text})}\n\n".encode()
+        done = json.dumps({
+            "model": data.get("model", req.model),
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            "request_id": request_id,
+        })
         yield f"event: done\ndata: {done}\n\n".encode()
-    except httpx.HTTPError as e:
-        error_msg = f"openrouter_http_error: {e}"
+    except Exception as exc:
+        error_msg = f"openrouter_parse_error: {exc}"
         yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
     finally:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         asyncio.create_task(
-            _log_usage(
-                user_id=user_id,
-                provider=req.provider,
-                model=req.model,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                duration_ms=elapsed_ms,
-                streamed=True,
-                request_id=request_id,
-                error=error_msg,
-            )
+            _log_usage(user_id=user_id, provider=req.provider, model=req.model,
+                       input_tokens=input_tokens, output_tokens=output_tokens,
+                       duration_ms=elapsed_ms, streamed=True,
+                       request_id=request_id, error=error_msg)
         )
 
 

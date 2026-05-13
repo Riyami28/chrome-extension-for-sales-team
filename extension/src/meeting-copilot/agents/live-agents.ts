@@ -50,7 +50,7 @@ const LIVE_MODELS: Record<LLMProvider, string | undefined> = {
   anthropic: "claude-haiku-4-5-20251001",
   gemini: "gemini-2.0-flash-lite",
   groq: "llama-3.1-8b-instant",
-  openrouter: "meta-llama/llama-3.1-8b-instruct:free",
+  openrouter: "openai/gpt-oss-20b:free",  // 8B had ~256 token cap on free tier; GPT-OSS 20B returns complete JSON
   ollama: undefined,   // user's local model
   custom: undefined,   // user's custom endpoint
 };
@@ -64,15 +64,24 @@ function liveModelOverride(): { provider: LLMProvider; model: string } | undefin
 }
 
 function safeJson<T>(raw: string): T | null {
-  const trimmed = raw.trim().replace(/^```(?:json)?/, "").replace(/```$/, "").trim();
+  // Strip markdown code fences — models sometimes wrap JSON even when told not to.
+  // Handle both single-line (```json{...}```) and multi-line variants.
+  const trimmed = raw
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```\s*$/i, "")
+    .trim();
   try { return JSON.parse(trimmed) as T; } catch { /* fall through */ }
+  // Try to extract the outermost {...} block if there's leading/trailing prose.
   const m = trimmed.match(/\{[\s\S]*\}/);
   if (m) {
     try { return JSON.parse(m[0]) as T; } catch { /* fall through */ }
   }
-  // Log the head of the raw output so we can see which model/provider is
-  // producing bad JSON without silently dropping the coach.
-  console.warn("[live-agents] JSON parse failed, raw head:", raw.slice(0, 200));
+  // Log full raw length + head so we can tell if it's truncation vs bad format.
+  console.warn(
+    `[live-agents] JSON parse failed (raw ${raw.length} chars), head:`,
+    raw.slice(0, 300),
+  );
   return null;
 }
 
@@ -351,7 +360,7 @@ Produce JSON only.`;
     : undefined;
 
   let raw = "";
-  try { raw = await callLiveLLM(COACH_SYSTEM, user, 500, streamCb); } catch (err) {
+  try { raw = await callLiveLLM(COACH_SYSTEM, user, 700, streamCb); } catch (err) {
     // Rethrow so the orchestrator can count consecutive failures and surface
     // a banner. Returning [] silently hid kill-switch conditions (wrong key,
     // quota hit, stalled stream) from the user.
