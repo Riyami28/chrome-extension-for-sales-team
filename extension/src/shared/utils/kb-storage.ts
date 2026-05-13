@@ -48,13 +48,43 @@ async function readAll(): Promise<KBEntry[]> {
   });
 }
 
+// chrome.storage.local hard cap is 10 MB. Warn at 80%, refuse at 95%
+// to prevent silent write failures that corrupt the entire KB.
+const QUOTA_BYTES = 10 * 1024 * 1024;
+
 async function writeAll(entries: KBEntry[]): Promise<void> {
   if (typeof chrome === "undefined" || !chrome.storage?.local) {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
     return;
   }
-  return new Promise((resolve) => {
-    chrome.storage.local.set({ [STORAGE_KEY]: entries }, () => resolve());
+
+  const payload = JSON.stringify(entries);
+  const estimatedBytes = new Blob([payload]).size;
+  const used: number = await new Promise((r) =>
+    chrome.storage.local.getBytesInUse(null, r)
+  );
+  const ratio = (used + estimatedBytes) / QUOTA_BYTES;
+
+  if (ratio >= 0.95) {
+    throw new Error(
+      `KB storage limit reached (${Math.round(ratio * 100)}% of 10 MB used). ` +
+      "Delete unused entries before adding more."
+    );
+  }
+  if (ratio >= 0.80) {
+    console.warn(
+      `[ClientLens] KB storage at ${Math.round(ratio * 100)}% of 10 MB. Consider removing unused entries.`
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    chrome.storage.local.set({ [STORAGE_KEY]: entries }, () => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
+      } else {
+        resolve();
+      }
+    });
   });
 }
 

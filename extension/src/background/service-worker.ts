@@ -41,13 +41,30 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   chrome.runtime.sendMessage({ type: "OBJECTION_CAPTURE", payload }).catch(() => { /* sidebar not open yet */ });
 });
 
-// Handle messages from sidebar + content scripts
+// ─── Unified message hub ─────────────────────────────────────────────────────
+// IMPORTANT: only ONE onMessage.addListener may exist in this file.
+// Chrome closes the response channel as soon as any listener returns a falsy
+// value — a second listener registered later never gets a chance to call
+// sendResponse for message types the first listener doesn't recognise.
+// All message handling (sidebar utils + V2 meeting copilot) lives here.
+
+// ─── V2 Meeting Copilot state ────────────────────────────────────────────────
+let activeSessionId: string | null = null;
+let activeMeetTabId: number | null = null;
+// Tracks whether the sidebar has its own live orchestrator running.
+// When true, the bg orchestrator must NOT start from a transponder MC_START_SESSION
+// to avoid paying double LLM cost on every call.
+let sidebarOrchestratorActive = false;
+
 chrome.runtime.onMessage.addListener(
   (message: ExtensionMessage, sender, sendResponse) => {
-    switch (message.type) {
+    const type = (message as { type?: string }).type ?? "";
+
+    // ── Sidebar utility messages ────────────────────────────────────────────
+    switch (type) {
       case "GET_PAGE_CONTEXT":
         handleGetPageContext(sender.tab?.id, sendResponse);
-        return true; // keep channel open for async
+        return true;
 
       case "GET_DOCUMENT_STATE":
         handleGetDocumentState(sender.tab?.id, sendResponse);
@@ -66,9 +83,7 @@ chrome.runtime.onMessage.addListener(
         return true;
 
       case "OPEN_SIDEBAR":
-        if (sender.tab?.id) {
-          chrome.sidePanel.open({ tabId: sender.tab.id });
-        }
+        if (sender.tab?.id) chrome.sidePanel.open({ tabId: sender.tab.id });
         sendResponse({ success: true });
         return false;
 
@@ -80,7 +95,73 @@ chrome.runtime.onMessage.addListener(
         handleCouncilNotify(message.payload);
         sendResponse({ success: true });
         return false;
+
+      // ── V2 Meeting Copilot messages ───────────────────────────────────────
+      case "MC_SIDEBAR_ORCHESTRATOR_STARTED":
+        sidebarOrchestratorActive = true;
+        return false;
+
+      case "MC_SIDEBAR_ORCHESTRATOR_STOPPED":
+        sidebarOrchestratorActive = false;
+        return false;
+
+      case "MC_START_SESSION": {
+        const m = message as { type: string; session_id?: string; tabId?: number; payload?: unknown };
+        activeSessionId = m.session_id || `mc-${Date.now()}`;
+        activeMeetTabId = m.tabId ?? sender.tab?.id ?? null;
+
+        // fromContent=true means the Meet page transponder started this session
+        // (sender.tab is the Meet tab). In that case, spin up a bg orchestrator
+        // ONLY if the sidebar orchestrator is not already running — otherwise
+        // we'd pay double LLM cost on every call.
+        const fromContent = Boolean(sender.tab);
+        if (fromContent && activeMeetTabId && !sidebarOrchestratorActive) {
+          const p = (m.payload || {}) as { meeting_title?: string; meeting_url?: string };
+          startBgOrchestrator({
+            sessionId: activeSessionId,
+            tabId: activeMeetTabId,
+            meetingTitle: p.meeting_title,
+            meetingUrl: p.meeting_url,
+          });
+        }
+
+        startAudioForSession({ sessionId: activeSessionId, tabId: activeMeetTabId ?? undefined })
+          .then((r) => sendResponse(r))
+          .catch((err) => sendResponse({ ok: false, error: String(err) }));
+        return true;
+      }
+
+      case "MC_STOP_SESSION": {
+        const sid = activeSessionId;
+        activeSessionId = null;
+        const tabId = activeMeetTabId;
+        activeMeetTabId = null;
+        sidebarOrchestratorActive = false;
+        stopBgOrchestrator();
+        stopAudio().then(() => {
+          if (tabId) {
+            chrome.tabs.sendMessage(tabId, { type: "MC_TRANSPONDER_CLOSE" }).catch(() => {});
+          }
+          sendResponse({ ok: true, session_id: sid });
+        });
+        return true;
+      }
+
+      case "MC_TRANSCRIPT_APPEND":
+        bgAppendTranscript((message as { payload?: TranscriptSegment }).payload as TranscriptSegment);
+        if (activeMeetTabId) {
+          chrome.tabs.sendMessage(activeMeetTabId, {
+            type: "MC_SESSION_UPDATED",
+            payload: { latest: (message as { payload?: unknown }).payload },
+          }).catch(() => {});
+        }
+        return false;
+
+      case "MC_AUDIO_STATE":
+        return false;
     }
+
+    return false;
   }
 );
 
@@ -270,80 +351,6 @@ async function handleUndoWrite(
   }
 }
 
-// ─── V2 Meeting Copilot message routing ─────────────────────────────────────
-// The service worker is the hub: sidebar → worker → offscreen for audio,
-// and worker broadcasts transcript/suggestion updates out to content scripts.
-
-let activeSessionId: string | null = null;
-let activeMeetTabId: number | null = null;
-
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (!msg || typeof msg !== "object") return false;
-  const m = msg as { type: string; session_id?: string; tabId?: number; payload?: unknown };
-
-  if (m.type === "MC_START_SESSION") {
-    activeSessionId = m.session_id || `mc-${Date.now()}`;
-    activeMeetTabId = m.tabId ?? sender.tab?.id ?? null;
-
-    // When the user clicks "Start copilot" from the in-Meet prompt (sender.tab
-    // is the Meet tab), do NOT pop open the side panel — the user wants the
-    // transponder to be the only UI. Instead spin up the live agents inside
-    // the service worker so sentiment / coach / agenda still flow without
-    // requiring the sidebar to be open.
-    const fromContent = Boolean(sender.tab);
-    if (fromContent && activeMeetTabId) {
-      const p = (m.payload || {}) as { meeting_title?: string; meeting_url?: string };
-      startBgOrchestrator({
-        sessionId: activeSessionId,
-        tabId: activeMeetTabId,
-        meetingTitle: p.meeting_title,
-        meetingUrl: p.meeting_url,
-      });
-    }
-
-    startAudioForSession({ sessionId: activeSessionId, tabId: activeMeetTabId ?? undefined })
-      .then((r) => sendResponse(r))
-      .catch((err) => sendResponse({ ok: false, error: String(err) }));
-    return true;
-  }
-
-  if (m.type === "MC_STOP_SESSION") {
-    const sid = activeSessionId;
-    activeSessionId = null;
-    const tabId = activeMeetTabId;
-    activeMeetTabId = null;
-    stopBgOrchestrator();
-    stopAudio().then(() => {
-      if (tabId) {
-        chrome.tabs.sendMessage(tabId, { type: "MC_TRANSPONDER_CLOSE" }).catch(() => { /* noop */ });
-      }
-      sendResponse({ ok: true, session_id: sid });
-    });
-    return true;
-  }
-
-  // Transcript updates come from the offscreen document. Relay to the Meet tab
-  // (so the transponder can animate the last segment) AND feed our background
-  // orchestrator so the live agents have something to chew on.
-  if (m.type === "MC_TRANSCRIPT_APPEND") {
-    bgAppendTranscript(m.payload as TranscriptSegment);
-    if (activeMeetTabId) {
-      chrome.tabs.sendMessage(activeMeetTabId, {
-        type: "MC_SESSION_UPDATED",
-        payload: { latest: m.payload },
-      }).catch(() => { /* noop */ });
-    }
-    // Sidebar listens on the same runtime channel; no fanout needed.
-    return false;
-  }
-
-  if (m.type === "MC_AUDIO_STATE") {
-    // Already broadcast; sidebar + transponder can subscribe.
-    return false;
-  }
-
-  return false;
-});
 
 // Keep service worker alive during active generation
 let keepAliveInterval: ReturnType<typeof setInterval> | null = null;

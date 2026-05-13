@@ -6,7 +6,7 @@
 // Each agent is a pure function over (session state, KB) that returns
 // an incremental update. Orchestration cadence lives in live-orchestrator.ts.
 
-import { embedText, makeLLMClient, resolveLLMConfig, type LLMProvider } from "../../shared/agents/llm-client";
+import { embedText, makeLLMClient, resolveLLMConfig, backendUrl, backendJwt, type LLMProvider } from "../../shared/agents/llm-client";
 import type {
   AgendaItem,
   CoachSuggestion,
@@ -568,6 +568,7 @@ export async function runLiveKbAsk(
   question: string,
   session: MeetingSession,
   kb: KBEntry[],
+  signal?: AbortSignal,
 ): Promise<{ answer: string; sources?: { kb_entry_id: string; quote: string }[]; rejected?: boolean }> {
   const q = question.trim();
   if (!q) return { answer: "Empty question." };
@@ -579,16 +580,38 @@ export async function runLiveKbAsk(
 
   const user = `Question: ${q}\n\nKB:\n${JSON.stringify(kbJson)}\n\nJSON only.`;
 
-  // Mid-call latency budget is tight — the rep asked while the prospect is
-  // talking. Use the fast live-tier model (haiku/flash-lite) and skip the
-  // validator pass: the answer prompt already enforces "quote KB verbatim,
-  // never invent," which is enough for a quick-look in-call answer. The
-  // earlier 2-call (answer + council) flow took ~6-10s and was unusable
-  // live. `session` is intentionally unused now but kept in the signature
-  // for callers that may re-add validation later.
+  // Mid-call latency: use a small fast model (8B) on a separate OpenRouter
+  // rate-limit pool from the coach (20B). KB output is ≤350 tokens — no
+  // truncation risk at 8B. X-Priority header routes through the user lane
+  // on the backend (separate semaphore, no gap wait).
   void session;
+  const cfg = resolveLLMConfig(liveModelOverride());
+  const provider = "error" in cfg ? "openrouter" : cfg.provider;
+  // Force a fast small model for KB asks — separate rate pool from coach.
+  const KB_FAST_MODEL = "meta-llama/llama-3.1-8b-instruct:free";
   let raw = "";
-  try { raw = await callLiveLLM(KB_ASK_SYSTEM, user, 350); } catch (err) {
+  try {
+    const jwt = await backendJwt();
+    const res = await fetch(`${backendUrl()}/api/v1/llm/complete`, {
+      method: "POST",
+      signal,  // AbortSignal — cancelled when rep asks a new question
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${jwt}`,
+        "X-Priority": "true",
+      },
+      body: JSON.stringify({
+        provider,
+        model: KB_FAST_MODEL,
+        system: KB_ASK_SYSTEM,
+        user,
+        max_tokens: 350,
+      }),
+    });
+    if (!res.ok) return { answer: "Error reaching backend" };
+    const data = await res.json() as { text?: string };
+    raw = data.text ?? "";
+  } catch (err) {
     return { answer: `Error: ${String(err)}` };
   }
   const parsed = safeJson<{ answer: string; sources?: { kb_entry_id: string; quote: string }[] }>(raw);

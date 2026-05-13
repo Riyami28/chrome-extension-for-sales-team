@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useMeetingCopilotStore } from "../stores/meeting-copilot-store";
 import { useAppStore } from "../stores/app-store";
 import { listKB } from "../../shared/utils/kb-storage";
@@ -48,6 +48,9 @@ export function MeetingCopilotPanel() {
   const summary = useMeetingCopilotStore((s) => s.lastSummary);
 
   const [kbEntries, setKbEntries] = useState<KBEntry[]>([]);
+  // AbortController for the current in-flight KB ask — aborted when a new
+  // question arrives so zombie fetches don't queue up on the backend.
+  const currentKbAskController = useRef<AbortController | null>(null);
   const company = useAppStore((s) => s.company);
   const [history, setHistory] = useState<StoredSessionSummary[]>([]);
   const [pushStatus, setPushStatus] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -85,10 +88,13 @@ export function MeetingCopilotPanel() {
         const askId = askPayload?.id;
         const currentSession = useMeetingCopilotStore.getState().session;
         if (!currentSession) return;
-        void runLiveKbAsk(question, currentSession, kbEntries).then((ans) => {
-          // Echo the question id back so the transponder can match this
-          // answer to the right thread entry — necessary because the rep
-          // may have already cancelled it by asking another question.
+        // Abort any in-flight KB ask so we don't accumulate zombie fetches
+        // when the rep types a new question before the previous one resolves.
+        currentKbAskController.current?.abort();
+        currentKbAskController.current = new AbortController();
+        const signal = currentKbAskController.current.signal;
+        void runLiveKbAsk(question, currentSession, kbEntries, signal).then((ans) => {
+          if (signal.aborted) return; // stale — new question already in flight
           const out = { ...ans, id: askId };
           chrome.runtime.sendMessage({ type: "MC_KB_ANSWER", payload: out }).catch(() => { /* noop */ });
           const tabId = currentSession.tab_id;
@@ -204,6 +210,9 @@ export function MeetingCopilotPanel() {
     prepareSession(input, meetTab?.id);
     setStatus("listening");
     startLiveOrchestrator(() => kbEntries);
+    // Tell the service worker the sidebar orchestrator is active so it won't
+    // spin up a duplicate bg orchestrator if the transponder also fires MC_START_SESSION.
+    chrome.runtime.sendMessage({ type: "MC_SIDEBAR_ORCHESTRATOR_STARTED" }).catch(() => {});
 
     await chrome.runtime.sendMessage({
       type: "MC_START_SESSION",
@@ -276,6 +285,7 @@ export function MeetingCopilotPanel() {
 
   async function stopSession() {
     stopLiveOrchestrator();
+    chrome.runtime.sendMessage({ type: "MC_SIDEBAR_ORCHESTRATOR_STOPPED" }).catch(() => {});
     const finalSession = useMeetingCopilotStore.getState().session;
     await chrome.runtime.sendMessage({ type: "MC_STOP_SESSION" }).catch(() => { /* noop */ });
     if (finalSession && finalSession.transcript.length > 0) {
