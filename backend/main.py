@@ -15,6 +15,12 @@ log = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("startup", service="clientlens-backend")
+    if settings.dev_mode:
+        log.critical(
+            "DEV_MODE is ENABLED — JWT verification is bypassed. "
+            "All requests are authenticated as a stub sales_rep user. "
+            "Never run this in production."
+        )
     await init_supabase()
     await init_vector_store()
     yield
@@ -27,17 +33,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
+# CORS: in production only the listed origins get credentialed access.
+# In dev_mode the regex also admits any chrome-extension:// caller and any
+# localhost port — extension IDs differ per unpacked load, making an explicit
+# list impractical until the build is uploaded to the Chrome Web Store.
+# `allow_credentials` is limited to dev_mode: the regex includes
+# http://localhost:\d+ which would allow any local HTTP server to make
+# credentialed requests if we set it unconditionally.
+_cors_kwargs: dict = dict(
     allow_origins=settings.allowed_origins,
-    # Local dev: also allow any chrome-extension:// caller and any localhost
-    # port. Extension IDs differ per unpacked load, so an explicit allow_origins
-    # list is impractical until the build is uploaded to the Chrome Web Store.
-    allow_origin_regex=r"^(chrome-extension://[a-z]{32}|http://localhost:\d+)$",
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+if settings.dev_mode:
+    _cors_kwargs["allow_origin_regex"] = r"^(chrome-extension://[a-z]{32}|http://localhost:\d+)$"
+    _cors_kwargs["allow_credentials"] = True
+else:
+    _cors_kwargs["allow_credentials"] = False
+
+app.add_middleware(CORSMiddleware, **_cors_kwargs)
 
 app.add_middleware(AuthMiddleware)
 

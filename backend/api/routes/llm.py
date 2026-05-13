@@ -565,6 +565,7 @@ def _openrouter_body(req: LLMRequest, *, stream: bool = False) -> dict:
 
 
 async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
+    import uuid as _uuid
     api_key = _openrouter_key()
     res = await _http().post(
         OPENROUTER_URL,
@@ -572,7 +573,19 @@ async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
         json=_openrouter_body(req),
     )
     if res.status_code >= 400:
-        raise HTTPException(status_code=res.status_code, detail=f"OpenRouter {res.status_code}: {res.text[:300]}")
+        req_id = str(_uuid.uuid4())
+        # Log full upstream body server-side; never echo it to the client —
+        # OpenRouter bodies can contain prompt fragments or routing metadata.
+        log.warning(
+            "openrouter.upstream_error",
+            status=res.status_code,
+            body=res.text[:500],
+            request_id=req_id,
+        )
+        raise HTTPException(
+            status_code=res.status_code,
+            detail={"error": "upstream_error", "request_id": req_id},
+        )
     data = res.json()
     text = ""
     choices = data.get("choices") or []
@@ -607,9 +620,18 @@ async def _stream_openrouter(req: LLMRequest, user_id: str) -> AsyncIterator[byt
             json=_openrouter_body(req, stream=True),
         ) as res:
             if res.status_code >= 400:
+                import uuid as _uuid
                 body = await res.aread()
-                error_msg = f"openrouter_status_{res.status_code}: {body[:300].decode(errors='replace')}"
-                yield f"event: error\ndata: {json.dumps({'error': error_msg})}\n\n".encode()
+                req_id = str(_uuid.uuid4())
+                # Log full body server-side; send only a request_id to client.
+                log.warning(
+                    "openrouter.stream_upstream_error",
+                    status=res.status_code,
+                    body=body[:500].decode(errors="replace"),
+                    request_id=req_id,
+                )
+                error_msg = f"openrouter_status_{res.status_code}"
+                yield f"event: error\ndata: {json.dumps({'error': 'upstream_error', 'request_id': req_id})}\n\n".encode()
                 return
 
             async for line in res.aiter_lines():

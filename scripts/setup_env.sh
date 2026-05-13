@@ -10,7 +10,7 @@
 # Usage:
 #   bash scripts/setup_env.sh
 #
-set -u
+set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -43,16 +43,16 @@ ask_secret() {
 echo "PUBLIC values (defaults are fine — press Enter to accept):"
 echo
 
-ask "Supabase URL" "https://vcjywpdnfmyiursjoxpi.supabase.co"
+ask "Supabase URL" "https://YOUR_PROJECT.supabase.co"
 SUPABASE_URL="$REPLY"
 
-ask "Supabase publishable key (anon)" "sb_publishable_L2HaxFLrU0BHEfpTcq5aTA_Y-hA-s1F"
+ask "Supabase publishable key (anon)" "YOUR_SUPABASE_ANON_KEY"
 SUPABASE_PUBLISHABLE="$REPLY"
 
 ask "Backend URL" "http://localhost:8000"
 BACKEND_URL="$REPLY"
 
-ask "Chrome OAuth Client ID" "311744529716-csv7nhp0q2ennnek624u87hi2e9a3u8a.apps.googleusercontent.com"
+ask "Chrome OAuth Client ID" "YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com"
 GOOGLE_CLIENT_ID="$REPLY"
 
 echo

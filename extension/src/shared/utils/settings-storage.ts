@@ -83,8 +83,14 @@ const SUPERSEDED_GEMINI_KEYS: readonly string[] = [];
 const SUPERSEDED_CUSTOM_KEYS = [DEAD_OPENROUTER_KEY] as const;
 
 const DEFAULTS: UserSettings = {
-  // Default to OpenRouter for local dev — proxied via backend, no extension key.
-  provider: "openrouter",
+  // Default to OpenRouter only in dev-mode builds so existing users on other
+  // providers aren't silently switched when they update the extension.
+  // In production builds (VITE_DEV_MODE unset/false) we keep "custom" as the
+  // factory default — matches the pre-PR behaviour so no hydrate migration is
+  // needed for existing installs.
+  provider: (import.meta.env.VITE_DEV_MODE as string | undefined) === "true"
+    ? "openrouter"
+    : "custom",
   anthropicKey: "",
   geminiKey: GEMINI_PRESET_KEY,
   groqKey: "",

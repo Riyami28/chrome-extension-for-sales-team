@@ -8,7 +8,7 @@
 # Usage:
 #   bash backend/scripts/run_tests.sh
 #
-set -u
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

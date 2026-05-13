@@ -39,8 +39,8 @@ import httpx
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_MODEL = "meta-llama/llama-3.3-70b-instruct:free"
-DEFAULT_FEATURES = "/Users/zopdev/Downloads/FEATURES (1).md"
-DEFAULT_RULES = "/Users/zopdev/Downloads/RECOMMENDATION-RULES (1).md"
+DEFAULT_FEATURES = os.path.expanduser("~/Downloads/FEATURES (1).md")
+DEFAULT_RULES = os.path.expanduser("~/Downloads/RECOMMENDATION-RULES (1).md")
 
 
 # ── Chunking (mirrors extension/src/shared/utils/chunker.ts) ──────────────────
@@ -297,7 +297,7 @@ def main() -> int:
 
     print("ZopNight KB · OpenRouter smoke test")
     print(f"  model    {model}")
-    print(f"  key      sk-or-v1-...{api_key[-6:]}  ({len(api_key)} chars)")
+    print(f"  key      sk-or-v1-...  ({len(api_key)} chars)")
 
     # ── Load + chunk ─────────────────────────────────────────────────────────
     print("\n── Loading KB ──")

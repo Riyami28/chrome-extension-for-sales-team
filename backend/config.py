@@ -43,3 +43,12 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Fail-fast if someone ships the placeholder jwt_secret to a non-dev deployment.
+# pydantic-settings silently accepts it, so we guard here instead.
+if settings.jwt_secret == "change-me-in-production" and not settings.dev_mode:
+    raise RuntimeError(
+        "JWT_SECRET is still set to the placeholder value 'change-me-in-production'. "
+        "Set a real secret in your .env before starting the server. "
+        "If you are running local dev without JWT auth, set DEV_MODE=true."
+    )

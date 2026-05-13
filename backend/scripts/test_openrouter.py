@@ -191,7 +191,7 @@ def main() -> int:
     print(f"  model    {model}")
     print(f"  referer  {referer}")
     print(f"  title    {title}")
-    print(f"  key      sk-or-v1-...{api_key[-6:]}  ({len(api_key)} chars)")
+    print(f"  key      sk-or-v1-...  ({len(api_key)} chars)")
 
     headers = make_headers(api_key, referer, title)
     with httpx.Client() as client:

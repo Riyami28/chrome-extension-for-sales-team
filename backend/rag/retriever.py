@@ -19,7 +19,15 @@ _index = None
 
 
 def _get_index():
+    """Return the Pinecone index handle, or None if the key is not configured.
+
+    vector_store.init_vector_store() skips init when PINECONE_API_KEY is empty,
+    so callers must guard for a None return rather than letting the Pinecone SDK
+    raise an AuthenticationError at query time.
+    """
     global _pc, _index
+    if not settings.pinecone_api_key:
+        return None
     if _index is None:
         _pc = Pinecone(api_key=settings.pinecone_api_key)
         _index = _pc.Index(settings.pinecone_index)
@@ -34,9 +42,11 @@ async def retrieve_context(
 ) -> list[dict]:
     """Retrieve top-k relevant chunks across specified namespaces."""
 
-    embedding = await get_embedding(query)
     index = _get_index()
+    if index is None:
+        return []  # Pinecone not configured (local dev); RAG returns empty
 
+    embedding = await get_embedding(query)
     all_results = []
 
     for namespace in namespaces:
@@ -77,9 +87,11 @@ async def upsert_document(
     metadata: dict,
 ) -> None:
     """Embed and upsert a document chunk into the vector store."""
-    embedding = await get_embedding(text)
     index = _get_index()
+    if index is None:
+        return  # Pinecone not configured (local dev); upsert is a no-op
 
+    embedding = await get_embedding(text)
     index.upsert(
         vectors=[{
             "id": doc_id,
@@ -95,4 +107,6 @@ async def upsert_document(
 
 async def delete_document(doc_id: str, namespace: str) -> None:
     index = _get_index()
+    if index is None:
+        return  # Pinecone not configured (local dev); delete is a no-op
     index.delete(ids=[doc_id], namespace=namespace)
