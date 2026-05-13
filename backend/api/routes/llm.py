@@ -39,6 +39,32 @@ router = APIRouter()
 log = structlog.get_logger()
 
 
+# ── OpenRouter global rate-limiter ───────────────────────────────────────────
+# Free tier allows ~10 req/min per model. We enforce a 3-second minimum gap
+# between calls + a concurrency cap of 1 so burst requests from the council
+# pipeline (4 sequential agents) and live copilot don't stack up and 429.
+# Requests queue here rather than failing — worst case a pitch takes ~12s
+# instead of ~3s, which is far better than an error.
+
+_or_lock = asyncio.Semaphore(1)       # only 1 OpenRouter call in-flight at a time
+_or_last_call: float = 0.0            # epoch seconds of last completed call
+_OR_MIN_GAP_S = 3.0                   # minimum seconds between calls
+
+
+async def _or_post(headers: dict, body: dict) -> httpx.Response:
+    """Rate-limited POST to OpenRouter. Queues callers instead of 429-ing."""
+    global _or_last_call
+    async with _or_lock:
+        gap = _OR_MIN_GAP_S - (time.monotonic() - _or_last_call)
+        if gap > 0:
+            log.debug("openrouter.throttle", wait_s=round(gap, 2))
+            await asyncio.sleep(gap)
+        try:
+            return await _http().post(OPENROUTER_URL, headers=headers, json=body)
+        finally:
+            _or_last_call = time.monotonic()
+
+
 # ── Request / response shapes ────────────────────────────────────────────────
 
 
@@ -139,6 +165,10 @@ async def _log_usage(
     Record one LLM call to the `llm_usage` table. Best-effort — a Supabase
     failure must not break the user-facing call. See migration 002_llm_usage.sql.
     """
+    # Dev-mode stub user has no row in user_profiles — skip DB write to avoid
+    # FK violation noise in logs. Usage tracking is irrelevant for local dev.
+    if settings.dev_mode:
+        return
     try:
         supabase_client().table("llm_usage").insert(
             {
@@ -577,11 +607,7 @@ async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
         if delay:
             log.info("openrouter.retry", attempt=attempt, delay_s=delay, model=req.model)
             await _asyncio.sleep(delay)
-        res = await _http().post(
-            OPENROUTER_URL,
-            headers=_openrouter_headers(api_key),
-            json=_openrouter_body(req),
-        )
+        res = await _or_post(_openrouter_headers(api_key), _openrouter_body(req))
         if res.status_code != 429:
             break
         log.warning("openrouter.rate_limited", attempt=attempt, model=req.model)
@@ -639,11 +665,7 @@ async def _stream_openrouter(req: LLMRequest, user_id: str) -> AsyncIterator[byt
         if delay:
             log.info("openrouter.stream_retry", attempt=attempt, delay_s=delay, model=req.model)
             await _asyncio.sleep(delay)
-        probe = await _http().post(
-            OPENROUTER_URL,
-            headers=_openrouter_headers(api_key),
-            json=_openrouter_body(req),  # non-streaming probe
-        )
+        probe = await _or_post(_openrouter_headers(api_key), _openrouter_body(req))
         if probe.status_code != 429:
             break
         log.warning("openrouter.stream_rate_limited", attempt=attempt, model=req.model)

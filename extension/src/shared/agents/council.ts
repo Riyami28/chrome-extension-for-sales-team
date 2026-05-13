@@ -182,7 +182,7 @@ Return JSON:
   "missing_info": ["what the KB does not cover for this target"]
 }`;
 
-  const text = await callLLM(client, system, user, 2000);
+  const text = await callLLM(client, system, user, 800);
   const parsed = extractJson<RetrievalOutput>(text) ?? {
     relevant_source_ids: filtered.slice(0, 5).map((e) => e.id),
     citations: [],
@@ -253,7 +253,7 @@ ${brief ? `\nPROSPECT RESEARCH (use this to personalize — pattern-match to the
 SOURCES (use ONLY these — cite source_id on each claim):
 ${summarizeKB(usedSources)}
 
-Output JSON:
+Output JSON (COMPACT — every character counts, keep content tight):
 {
   "slides": [
     {
@@ -265,9 +265,9 @@ Output JSON:
   ]
 }
 
-Produce 5–7 slides. Every numeric claim must be traceable to a source_id above.`;
+Produce EXACTLY 4 slides (no more, no fewer). Keep each slide title ≤8 words, content ≤40 words, speaker_notes ≤20 words. Every numeric claim must cite a source_id.`;
 
-  const text = await callLLM(client, system, user, 3500);
+  const text = await callLLM(client, system, user, 1800);
   const parsed = extractJson<{ slides: SlideContent[] }>(text);
 
   if (!parsed?.slides?.length) {
@@ -399,7 +399,7 @@ Return JSON:
 
 // ─── Council Orchestrator ─────────────────────────────────────────────────────
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 1; // free-tier: max 2 attempts (8 LLM calls total) to stay within rate limits
 
 export async function* runCouncil(opts: {
   input: PersonalizationInput;
