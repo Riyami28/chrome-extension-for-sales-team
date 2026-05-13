@@ -81,7 +81,7 @@ async function startCapture(payload: { streamId: string; session_id: string }) {
   source.connect(processor);
   processor.connect(destination);
 
-  stt = createSttProvider();
+  stt = await createSttProvider();
   await stt.start({
     sampleRate: TARGET_SAMPLE_RATE,
     defaultSpeaker: "prospect",
@@ -107,7 +107,7 @@ async function startCapture(payload: { streamId: string; session_id: string }) {
 
 async function startMockCapture(payload: { session_id: string }) {
   sessionId = payload.session_id;
-  stt = createSttProvider();
+  stt = await createSttProvider();
   await stt.start({
     sampleRate: TARGET_SAMPLE_RATE,
     defaultSpeaker: "prospect",

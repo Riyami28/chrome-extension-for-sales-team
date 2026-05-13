@@ -24,6 +24,12 @@ class Settings(BaseSettings):
     pinecone_api_key: str = ""
     pinecone_index: str = "clientlens"
 
+    # Deepgram — kept server-side so the API key is never baked into the
+    # extension bundle. The /api/v1/stt/token endpoint mints short-lived
+    # (60 s) temporary keys for the extension to use directly with Deepgram.
+    deepgram_api_key: str = ""
+    deepgram_project_id: str = ""  # required to mint temp keys; get from Deepgram console
+
     # Google
     google_client_id: str = ""
     google_client_secret: str = ""
