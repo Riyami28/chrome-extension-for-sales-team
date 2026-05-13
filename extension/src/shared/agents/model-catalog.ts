@@ -55,6 +55,13 @@ export const MODEL_CATALOG: ModelOption[] = [
   },
   {
     provider: "openrouter",
+    model: "meta-llama/llama-3.1-8b-instruct:free",
+    label: "Llama 3.1 8B (OpenRouter)",
+    tier: "free",
+    note: "Free · fast 8B · used automatically for live copilot agents",
+  },
+  {
+    provider: "openrouter",
     model: "meta-llama/llama-3.3-70b-instruct:free",
     label: "Llama 3.3 70B (OpenRouter)",
     tier: "free",

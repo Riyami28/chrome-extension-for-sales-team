@@ -6,13 +6,18 @@ import type { KBEntry } from "../../shared/types";
 import { runAgendaTracker, runCoachAgent, runLiveCouncilValidator, runSentimentAgent } from "./live-agents";
 import { computeSentimentTrend, computeAgendaPacing, rejectionFromOutcome } from "./live-helpers";
 
-const SENTIMENT_INTERVAL_MS = 20_000;
-const AGENDA_INTERVAL_MS = 30_000;
-const COACH_INTERVAL_MS = 15_000;
+const SENTIMENT_INTERVAL_MS = 45_000;   // was 20s — free-tier saves ~60% of quota
+const AGENDA_INTERVAL_MS = 60_000;      // was 30s — agenda changes slowly
+const COACH_INTERVAL_MS = 30_000;       // was 15s — still fast enough for live coaching
 
-const LIVE_COACH_MIN_GAP_MS = 2_500;
-const LIVE_SENTIMENT_MIN_GAP_MS = 4_000;
-const LIVE_TRIGGER_DEBOUNCE_MS = 350;
+const LIVE_COACH_MIN_GAP_MS = 10_000;   // was 2.5s — prevents burst on fast talkers
+const LIVE_SENTIMENT_MIN_GAP_MS = 15_000; // was 4s
+const LIVE_TRIGGER_DEBOUNCE_MS = 600;   // was 350ms — a bit more buffering
+
+// When a 429 lands, all agents pause for this window before retrying.
+// Helps with OpenRouter free-pool bursts where every model shares one
+// rate-limit bucket. 25s is long enough for the bucket to refill.
+const RATE_LIMIT_COOLDOWN_MS = 25_000;
 
 const AGENT_ERROR_THRESHOLD = 3;
 const THINKING_LINGER_MS = 200;
@@ -39,6 +44,23 @@ let coachErrorStreak = 0;
 let sentimentErrorStreak = 0;
 let agendaErrorStreak = 0;
 let errorBanner: string | null = null;
+
+// Global 429 cooldown — when any agent hits a rate limit all agents hold
+// off until this timestamp. Prevents the cascade where sentiment retries
+// immediately after coach's 429 and burns the remaining quota.
+let rateLimitUntil = 0;
+
+function isRateLimited(): boolean {
+  return Date.now() < rateLimitUntil;
+}
+
+function markRateLimited(err: unknown): void {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.toLowerCase().includes("rate limit") || msg.includes("429")) {
+    rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+    console.debug(`[live-orch] 429 detected — all agents paused for ${RATE_LIMIT_COOLDOWN_MS / 1000}s`);
+  }
+}
 
 function friendlyErr(err: unknown): string {
   if (err instanceof Error) return err.message.split("\n")[0].slice(0, 140);
@@ -84,6 +106,7 @@ function mirrorToTab(payload: Record<string, unknown>) {
 
 async function runSentimentNow(): Promise<void> {
   if (sentimentInFlight) { sentimentPending = true; return; }
+  if (isRateLimited()) return; // back off during global cooldown
   const session = useMeetingCopilotStore.getState().session;
   if (!session || session.status !== "listening") return;
   sentimentInFlight = true;
@@ -94,6 +117,7 @@ async function runSentimentNow(): Promise<void> {
       snap = await runSentimentAgent(session);
       noteAgentSuccess("sentiment");
     } catch (err) {
+      markRateLimited(err);
       noteAgentError("sentiment", err);
       return;
     }
@@ -114,6 +138,7 @@ async function runSentimentNow(): Promise<void> {
 
 async function runCoachNow(): Promise<void> {
   if (coachInFlight) { coachPending = true; return; }
+  if (isRateLimited()) return; // back off during global cooldown
   const session = useMeetingCopilotStore.getState().session;
   if (!session || session.status !== "listening") return;
   coachInFlight = true;
@@ -128,13 +153,22 @@ async function runCoachNow(): Promise<void> {
       });
       noteAgentSuccess("coach");
     } catch (err) {
+      markRateLimited(err);
       noteAgentError("coach", err);
       return;
     }
-    // Run validators in parallel — they don't depend on each other.
-    const outcomes = await Promise.all(
-      suggestions.map((s) => runLiveCouncilValidator(s, session, kb)),
-    );
+    // Run validators sequentially — parallel calls stack 429s on free-tier
+    // OpenRouter. The 30s coach cadence absorbs the extra ~1s per validator.
+    const outcomes: Awaited<ReturnType<typeof runLiveCouncilValidator>>[] = [];
+    for (const s of suggestions) {
+      if (isRateLimited()) break; // bail mid-loop if we just hit a 429
+      try {
+        outcomes.push(await runLiveCouncilValidator(s, session, kb));
+      } catch (err) {
+        markRateLimited(err);
+        break;
+      }
+    }
     for (let i = 0; i < outcomes.length; i++) {
       const outcome = outcomes[i];
       const original = suggestions[i];
@@ -162,17 +196,23 @@ async function runCoachNow(): Promise<void> {
 }
 
 // Debounced live trigger. Called by the transcript poller below whenever a
-// new final segment lands; runs coach + sentiment immediately so Say-this and
-// Avoid update in lock-step with the conversation instead of every 15s.
+// new final segment lands; runs coach + sentiment in staggered fashion so
+// they don't both hit the free-tier rate bucket at the same instant.
+// Coach fires first; sentiment fires 3s later — by then the coach call is
+// typically in-flight (counted against the bucket) rather than queued.
 function scheduleLiveTrigger() {
   if (liveTriggerTimer) clearTimeout(liveTriggerTimer);
   liveTriggerTimer = setTimeout(() => {
     const now = Date.now();
-    // Don't gate on inFlight — runCoachNow/runSentimentNow set the *Pending
-    // flag and re-fire on completion, so Opus (5-9s round trips) catches up
-    // to the conversation instead of dropping every segment spoken mid-call.
-    if (coachInFlight || now - lastCoachAt >= LIVE_COACH_MIN_GAP_MS) void runCoachNow();
-    if (sentimentInFlight || now - lastSentimentAt >= LIVE_SENTIMENT_MIN_GAP_MS) void runSentimentNow();
+    if (!isRateLimited()) {
+      if (coachInFlight || now - lastCoachAt >= LIVE_COACH_MIN_GAP_MS) void runCoachNow();
+      // Stagger sentiment 3s after coach so they never hit the API together.
+      setTimeout(() => {
+        if (!isRateLimited() && (sentimentInFlight || Date.now() - lastSentimentAt >= LIVE_SENTIMENT_MIN_GAP_MS)) {
+          void runSentimentNow();
+        }
+      }, 3_000);
+    }
   }, LIVE_TRIGGER_DEBOUNCE_MS) as unknown as number;
 }
 
@@ -207,6 +247,7 @@ export function startLiveOrchestrator(kbProvider: () => KBEntry[]): void {
   scheduleLoop(() => void runSentimentNow(), SENTIMENT_INTERVAL_MS);
 
   scheduleLoop(async () => {
+    if (isRateLimited()) return;
     const session = useMeetingCopilotStore.getState().session;
     if (!session || session.status !== "listening") return;
     let agenda = null;
@@ -214,6 +255,7 @@ export function startLiveOrchestrator(kbProvider: () => KBEntry[]): void {
       agenda = await runAgendaTracker(session);
       noteAgentSuccess("agenda");
     } catch (err) {
+      markRateLimited(err);
       noteAgentError("agenda", err);
       return;
     }
@@ -236,4 +278,5 @@ export function stopLiveOrchestrator(): void {
   stopTranscriptWatch();
   coachErrorStreak = 0; sentimentErrorStreak = 0; agendaErrorStreak = 0;
   errorBanner = null;
+  rateLimitUntil = 0;
 }

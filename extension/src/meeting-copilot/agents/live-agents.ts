@@ -43,10 +43,14 @@ function liveWindow(transcript: TranscriptSegment[]): string {
 
 // Per-provider fast-tier model. Live agents use this; council/email keep
 // whatever the user picked in Settings.
+// For OpenRouter we pick the smallest reliable free model so parallel agent
+// calls don't stack up on the 429-prone 70B quota. 8B instant is ~3× faster
+// and shares a different rate-limit bucket from the main model.
 const LIVE_MODELS: Record<LLMProvider, string | undefined> = {
   anthropic: "claude-haiku-4-5-20251001",
   gemini: "gemini-2.0-flash-lite",
   groq: "llama-3.1-8b-instant",
+  openrouter: "meta-llama/llama-3.1-8b-instruct:free",
   ollama: undefined,   // user's local model
   custom: undefined,   // user's custom endpoint
 };
