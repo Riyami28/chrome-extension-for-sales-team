@@ -93,12 +93,16 @@ export const useMeetingCopilotStore = create<MeetingCopilotState>((set) => ({
   appendTranscript: (seg) =>
     set((s) => {
       if (!s.session) return s;
-      // Replace trailing interim of same speaker with latest, else append.
       const trimmed = s.session.transcript.slice();
+
+      // Dedup: skip if this exact final segment ID already landed (happens on
+      // WebSocket reconnect or double-delivery from the offscreen doc).
+      if (seg.is_final && trimmed.some((t) => t.id === seg.id && t.is_final)) return s;
+
+      // Replace the trailing non-final segment of the same speaker (covers
+      // both interim→interim and interim→final transitions in one branch).
       const last = trimmed[trimmed.length - 1];
-      if (last && !last.is_final && last.speaker === seg.speaker && !seg.is_final) {
-        trimmed[trimmed.length - 1] = seg;
-      } else if (last && !last.is_final && last.speaker === seg.speaker && seg.is_final) {
+      if (last && !last.is_final && last.speaker === seg.speaker) {
         trimmed[trimmed.length - 1] = seg;
       } else {
         trimmed.push(seg);

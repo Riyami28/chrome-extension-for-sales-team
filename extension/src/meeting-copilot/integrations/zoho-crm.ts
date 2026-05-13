@@ -148,9 +148,47 @@ async function zohoGet<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/**
+ * Build a ZohoTokens-shaped object from the settings-based credentials so
+ * lookupContext can use the same code path regardless of how auth happened.
+ * The Settings path stores a refresh token; we exchange it for an access token
+ * on demand rather than caching it (it's only used for one lookup per call).
+ */
+async function tokensFromSettings(): Promise<ZohoTokens | null> {
+  try {
+    // Lazy-import settings to avoid circular deps with this file being used in BG context.
+    const { getSettings } = await import("../../shared/utils/settings-storage");
+    const cfg = getSettings().integrations.zoho;
+    const { clientId, clientSecret, refreshToken, apiDomain } = cfg.fields;
+    if (!clientId || !clientSecret || !refreshToken || !apiDomain) return null;
+
+    const accountsHost = (cfg.fields.accountsUrl || "https://accounts.zoho.com").replace(/\/$/, "");
+    const res = await fetch(
+      `${accountsHost}/oauth/v2/token?refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=refresh_token`,
+      { method: "POST" },
+    );
+    if (!res.ok) return null;
+    const body = (await res.json()) as { access_token?: string; expires_in?: number };
+    if (!body.access_token) return null;
+
+    // Derive DC from apiDomain (e.g. "https://www.zohoapis.eu/..." → "eu").
+    const domainDc = (apiDomain.match(/zohoapis\.([a-z.]+)/)?.[1] || "com").replace(/\.$/, "");
+    return {
+      access_token: body.access_token,
+      refresh_token: refreshToken,
+      expires_at: Date.now() + ((body.expires_in ?? 3600) - 60) * 1000,
+      dc: domainDc,
+    };
+  } catch { return null; }
+}
+
 export async function lookupContext(opts: { attendeeEmails?: string[]; companyName?: string }): Promise<CRMContext> {
   const ctx: CRMContext = { provider: "zoho" };
-  const tokens = await loadTokens();
+  // Try OAuth tokens first (chrome.identity flow), then fall back to
+  // settings-based credentials (manual client_id/secret/refresh_token entry).
+  // This lets either connection path work for the pre-call CRM pull.
+  let tokens = await loadTokens();
+  if (!tokens) tokens = await tokensFromSettings();
   if (!tokens) return { provider: "none" };
 
   try {
@@ -184,8 +222,12 @@ export async function lookupContext(opts: { attendeeEmails?: string[]; companyNa
     }
 
     if (ctx.account_id) {
+      // Use dot notation to search by the related account's ID.
+      // Plain `Account_Name:equals:{id}` searches the display name string,
+      // not the foreign key — it would always return zero results.
+      const q = encodeURIComponent(`(Account_Name.id:equals:${ctx.account_id})`);
       const deals = await zohoGet<{ data?: { id: string; Deal_Name: string; Stage?: string; Amount?: number }[] }>(
-        `/Deals/search?criteria=(Account_Name:equals:${ctx.account_id})`,
+        `/Deals/search?criteria=${q}`,
       ).catch(() => ({ data: [] }));
       if (deals.data?.length) {
         const d = deals.data[0];

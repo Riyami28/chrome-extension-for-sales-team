@@ -31,6 +31,11 @@ const GEMINI_EMBED_MODEL = "text-embedding-004"; // 768 dims, free tier
 // free-tier Llama; users override via Settings or the ModelPicker.
 const OPENROUTER_MODEL = "meta-llama/llama-3.3-70b-instruct:free";
 
+// Timeout constants. AbortSignal.timeout() is Chrome 103+ (2022) — safe for
+// an extension that only runs in modern Chrome.
+const LLM_TIMEOUT_MS = 30_000;    // non-streaming: 30 s should be ample
+const STREAM_TIMEOUT_MS = 120_000; // streaming: allow up to 2 min for large models
+
 /**
  * Translate a raw upstream error body into a concise user-facing message.
  * Credential / quota / rate-limit failures get a hint pointing to Settings;
@@ -122,7 +127,7 @@ export interface LLMClient {
 // through the FastAPI backend at `${BACKEND_URL}/api/v1/llm/{complete,stream}`,
 // authenticated with the user's Supabase JWT. See `backend/api/routes/llm.py`.
 
-function backendUrl(): string {
+export function backendUrl(): string {
   const url = (import.meta.env.VITE_BACKEND_URL as string | undefined)?.replace(/\/$/, "");
   if (!url) {
     throw new Error(
@@ -133,7 +138,7 @@ function backendUrl(): string {
   return url;
 }
 
-async function backendJwt(): Promise<string> {
+export async function backendJwt(): Promise<string> {
   // Local dev bypass: extension's chrome.identity sign-in doesn't produce a
   // Supabase JWT (auth-wiring gap in the original code), so when
   // VITE_DEV_MODE=true we send a stub bearer and the backend's AuthMiddleware
@@ -204,6 +209,7 @@ class ProxiedLLMClient implements LLMClient {
     const jwt = await backendJwt();
     const res = await fetch(url, {
       method: "POST",
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${jwt}`,
@@ -234,6 +240,7 @@ class ProxiedLLMClient implements LLMClient {
     const jwt = await backendJwt();
     const res = await fetch(url, {
       method: "POST",
+      signal: AbortSignal.timeout(STREAM_TIMEOUT_MS),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${jwt}`,
@@ -284,6 +291,7 @@ class OllamaClient implements LLMClient {
     const base = this.cfg.baseUrl ?? OLLAMA_BASE;
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         model: this.cfg.model,
@@ -316,6 +324,7 @@ class CustomOpenAICompatClient implements LLMClient {
     if (this.cfg.apiKey) headers.Authorization = `Bearer ${this.cfg.apiKey}`;
     const res = await fetch(url, {
       method: "POST",
+      signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
       headers,
       body: JSON.stringify({
         model: this.cfg.model,
@@ -358,6 +367,7 @@ async function postEmbed(texts: string[]): Promise<number[][]> {
   const jwt = await backendJwt();
   const res = await fetch(url, {
     method: "POST",
+    signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${jwt}`,

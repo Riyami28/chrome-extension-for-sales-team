@@ -1,7 +1,7 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { resolve } from "path";
-import { cpSync, existsSync } from "fs";
+import { cpSync, existsSync, copyFileSync } from "fs";
 
 function copyStaticAssets() {
   return {
@@ -12,6 +12,13 @@ function copyStaticAssets() {
       cpSync(resolve(root, "manifest.json"), resolve(out, "manifest.json"));
       if (existsSync(resolve(root, "icons"))) {
         cpSync(resolve(root, "icons"), resolve(out, "icons"), { recursive: true });
+      }
+      // AudioWorklet processor — must be served as a plain script at the
+      // extension root so chrome.runtime.getURL('audio-processor.js') resolves.
+      // Vite does not bundle it (AudioWorklet scripts can't have ESM imports).
+      const audioProc = resolve(root, "src/offscreen/audio-processor.js");
+      if (existsSync(audioProc)) {
+        copyFileSync(audioProc, resolve(out, "audio-processor.js"));
       }
     },
   };

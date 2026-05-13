@@ -9,7 +9,7 @@ import type {
   TranscriptSegment,
 } from "../../shared/types";
 import { generatePostCallSummary } from "../../meeting-copilot/agents/post-call-summary";
-import { runLiveKbAsk } from "../../meeting-copilot/agents/live-agents";
+import { clearValidatorCache, runLiveKbAsk } from "../../meeting-copilot/agents/live-agents";
 import { startLiveOrchestrator, stopLiveOrchestrator } from "../../meeting-copilot/agents/live-orchestrator";
 import { connectCalendarInteractive } from "../../meeting-copilot/integrations/google-calendar";
 import {
@@ -122,6 +122,10 @@ export function MeetingCopilotPanel() {
 
   const [urlBusy, setUrlBusy] = useState(false);
   const [urlStatus, setUrlStatus] = useState<{ ok: boolean; detail: string } | null>(null);
+  // Guard against double-click on "Start live copilot". The session state
+  // updates asynchronously (after chrome.tabs.query), so the button would
+  // accept a second click during that gap without this flag.
+  const [startBusy, setStartBusy] = useState(false);
 
   async function handleLookupUrl() {
     const url = meetingUrl.trim();
@@ -193,6 +197,8 @@ export function MeetingCopilotPanel() {
   }
 
   async function startSession() {
+    if (startBusy) return;  // guard: drop second click that lands before session state settles
+    setStartBusy(true);
     const url = meetingUrl.trim();
     const noteParts = [meetingNotes.trim(), url ? `Meeting link: ${url}` : ""].filter(Boolean);
     const mergedNotes = noteParts.join("\n\n");
@@ -205,34 +211,39 @@ export function MeetingCopilotPanel() {
       meeting_notes: mergedNotes || undefined,
     };
 
-    const tabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
-    const meetTab = tabs[0];
-    prepareSession(input, meetTab?.id);
-    setStatus("listening");
-    startLiveOrchestrator(() => kbEntries);
-    // Tell the service worker the sidebar orchestrator is active so it won't
-    // spin up a duplicate bg orchestrator if the transponder also fires MC_START_SESSION.
-    chrome.runtime.sendMessage({ type: "MC_SIDEBAR_ORCHESTRATOR_STARTED" }).catch(() => {});
+    try {
+      clearValidatorCache(); // flush stale verdicts from last session
+      const tabs = await chrome.tabs.query({ url: "https://meet.google.com/*" });
+      const meetTab = tabs[0];
+      prepareSession(input, meetTab?.id);
+      setStatus("listening");
+      startLiveOrchestrator(() => kbEntries);
+      // Tell the service worker the sidebar orchestrator is active so it won't
+      // spin up a duplicate bg orchestrator if the transponder also fires MC_START_SESSION.
+      chrome.runtime.sendMessage({ type: "MC_SIDEBAR_ORCHESTRATOR_STARTED" }).catch(() => {});
 
-    await chrome.runtime.sendMessage({
-      type: "MC_START_SESSION",
-      session_id: useMeetingCopilotStore.getState().session?.id,
-      tabId: meetTab?.id,
-      payload: { input },
-    });
-
-    if (!meetTab?.id) {
-      setTransponderStatus({
-        ok: false,
-        detail: "No Google Meet tab open. Open one and click Start again — copilot still runs in this panel.",
+      await chrome.runtime.sendMessage({
+        type: "MC_START_SESSION",
+        session_id: useMeetingCopilotStore.getState().session?.id,
+        tabId: meetTab?.id,
+        payload: { input },
       });
-      return;
+
+      if (!meetTab?.id) {
+        setTransponderStatus({
+          ok: false,
+          detail: "No Google Meet tab open. Open one and click Start again — copilot still runs in this panel.",
+        });
+        return;
+      }
+      await openTransponderOnTab(meetTab.id, {
+        status: "listening",
+        input,
+        agenda: input.agenda,
+      });
+    } finally {
+      setStartBusy(false);
     }
-    await openTransponderOnTab(meetTab.id, {
-      status: "listening",
-      input,
-      agenda: input.agenda,
-    });
   }
 
   async function openTransponderOnTab(tabId: number, payload: Record<string, unknown>) {
@@ -547,8 +558,12 @@ export function MeetingCopilotPanel() {
 
       <div style={section}>
         {!isLive ? (
-          <button style={{ ...primaryBtn, opacity: readyToStart ? 1 : 0.4 }} disabled={!readyToStart} onClick={startSession}>
-            Start live copilot
+          <button
+            style={{ ...primaryBtn, opacity: (readyToStart && !startBusy) ? 1 : 0.4 }}
+            disabled={!readyToStart || startBusy}
+            onClick={startSession}
+          >
+            {startBusy ? "Starting…" : "Start live copilot"}
           </button>
         ) : (
           <button style={primaryBtn} onClick={stopSession}>End session &amp; summarize</button>

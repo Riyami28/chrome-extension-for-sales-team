@@ -464,6 +464,15 @@ function cacheVerdict(s: CoachSuggestion, outcome: LiveValidationOutcome): void 
   }
 }
 
+/**
+ * Clear all cached validator verdicts. Call at session start so stale
+ * approvals/rejections from a previous call don't bleed into a new session.
+ * (The 30 s TTL alone isn't enough when sessions are back-to-back.)
+ */
+export function clearValidatorCache(): void {
+  VALIDATOR_CACHE.clear();
+}
+
 export async function runLiveCouncilValidator(
   suggestion: CoachSuggestion,
   session: MeetingSession,

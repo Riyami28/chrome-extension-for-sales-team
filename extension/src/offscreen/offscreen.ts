@@ -13,7 +13,10 @@ const TARGET_SAMPLE_RATE = 16000;
 
 let audioCtx: AudioContext | null = null;
 let source: MediaStreamAudioSourceNode | null = null;
-let processor: ScriptProcessorNode | null = null;
+// AudioWorkletNode replaces the deprecated ScriptProcessorNode.
+// The worklet processor file (audio-processor.js) is copied verbatim to the
+// extension dist root by vite.config.ts and loaded via chrome.runtime.getURL.
+let worklet: AudioWorkletNode | null = null;
 let stream: MediaStream | null = null;
 let stt: SttProvider | null = null;
 let sessionId: string | null = null;
@@ -71,15 +74,16 @@ async function startCapture(payload: { streamId: string; session_id: string }) {
 
   // Keep playing tab audio aloud — we're a silent listener, not a mute box.
   audioCtx = new AudioContext();
-  const destination = audioCtx.createMediaStreamDestination();
   source = audioCtx.createMediaStreamSource(stream);
   const passthroughGain = audioCtx.createGain();
   source.connect(passthroughGain);
   passthroughGain.connect(audioCtx.destination);
 
-  processor = audioCtx.createScriptProcessor(4096, 1, 1);
-  source.connect(processor);
-  processor.connect(destination);
+  // Use AudioWorkletNode (replaces deprecated ScriptProcessorNode).
+  // The processor is a plain JS file served from the extension root.
+  await audioCtx.audioWorklet.addModule(chrome.runtime.getURL("audio-processor.js"));
+  worklet = new AudioWorkletNode(audioCtx, "pcm-processor", { numberOfOutputs: 0 });
+  source.connect(worklet);
 
   stt = await createSttProvider();
   await stt.start({
@@ -94,9 +98,9 @@ async function startCapture(payload: { streamId: string; session_id: string }) {
   });
 
   const inRate = audioCtx.sampleRate;
-  processor.onaudioprocess = (ev) => {
+  worklet.port.onmessage = (ev: MessageEvent<{ pcm: ArrayBuffer }>) => {
     if (!stt || !stt.isRunning()) return;
-    const ch = ev.inputBuffer.getChannelData(0);
+    const ch = new Float32Array(ev.data.pcm);
     const downsampled = downsample(ch, inRate, TARGET_SAMPLE_RATE);
     const pcm = floatTo16BitPCM(downsampled);
     stt.pushAudio(pcm);
@@ -122,7 +126,7 @@ async function startMockCapture(payload: { session_id: string }) {
 }
 
 async function stopCapture() {
-  if (processor) { try { processor.disconnect(); } catch { /* noop */ } processor = null; }
+  if (worklet) { try { worklet.disconnect(); worklet.port.close(); } catch { /* noop */ } worklet = null; }
   if (source) { try { source.disconnect(); } catch { /* noop */ } source = null; }
   if (audioCtx) { try { await audioCtx.close(); } catch { /* noop */ } audioCtx = null; }
   if (stream) {

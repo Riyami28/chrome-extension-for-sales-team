@@ -19,6 +19,9 @@ export function ResultPanel({ result }: Props) {
   const [copied, setCopied] = useState(false);
   const [writing, setWriting] = useState(false);
   const [writeStatus, setWriteStatus] = useState<WriteResponse | null>(null);
+  // Two-click write confirmation. First click shows a warning; second click
+  // actually writes. Resets on any state change or after 5 s timeout.
+  const [writeConfirm, setWriteConfirm] = useState(false);
   const { setFlowStep, setLastResult, personalization } = useAppStore();
   const pitchFormat: PitchFormat = personalization?.pitch_format || "on_screen_ppt";
 
@@ -29,6 +32,14 @@ export function ResultPanel({ result }: Props) {
   }
 
   async function handleWrite() {
+    // First click: show the confirmation state and auto-dismiss after 5 s.
+    if (!writeConfirm) {
+      setWriteConfirm(true);
+      setTimeout(() => setWriteConfirm(false), 5000);
+      return;
+    }
+    // Second click (within 5 s): actually write.
+    setWriteConfirm(false);
     setWriting(true);
     setWriteStatus(null);
     try {
@@ -180,10 +191,14 @@ export function ResultPanel({ result }: Props) {
               <button
                 onClick={handleWrite}
                 disabled={writing}
-                className="flex items-center justify-center gap-1.5 py-2 bg-violet-600 hover:bg-violet-500 disabled:bg-slate-700 text-white rounded-lg text-xs transition-colors"
+                className={`flex items-center justify-center gap-1.5 py-2 text-white rounded-lg text-xs transition-colors ${
+                  writeConfirm
+                    ? "bg-amber-600 hover:bg-amber-500 border border-amber-500"
+                    : "bg-violet-600 hover:bg-violet-500 disabled:bg-slate-700"
+                }`}
               >
                 {writing ? <Loader2 size={12} className="animate-spin" /> : <ExternalLink size={12} />}
-                {writing ? "Writing…" : "Write to open doc"}
+                {writing ? "Writing…" : writeConfirm ? "Confirm overwrite?" : "Write to open doc"}
               </button>
             )}
           </div>

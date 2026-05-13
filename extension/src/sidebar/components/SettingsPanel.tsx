@@ -661,11 +661,18 @@ function ProviderPicker({
   settings: UserSettings;
   onPick: (p: UserSettings["provider"]) => void;
 }) {
+  // Providers proxied through the backend — no client-side API key needed.
+  const PROXIED = new Set(["anthropic", "gemini", "groq", "openrouter"]);
+
   const providers: { id: UserSettings["provider"]; label: string }[] = [
+    { id: "openrouter", label: "OpenRouter" },
     { id: "gemini", label: "Gemini" },
     { id: "anthropic", label: "Claude" },
+    { id: "groq", label: "Groq" },
+    { id: "ollama", label: "Ollama" },
     { id: "custom", label: settings.customLabel || "Custom" },
   ];
+  const isProxied = PROXIED.has(settings.provider);
   return (
     <div>
       <div className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-4 mb-1.5">
@@ -689,6 +696,15 @@ function ProviderPicker({
           );
         })}
       </div>
+      {isProxied && (
+        <div className="mt-1.5 text-[10px] text-ink-4 leading-snug">
+          API key is managed by the backend — no client-side key needed.
+          Set <span className="font-mono">OPENROUTER_API_KEY</span> /
+          <span className="font-mono"> ANTHROPIC_API_KEY</span> /
+          <span className="font-mono"> GROQ_API_KEY</span> in{" "}
+          <span className="font-mono">backend/.env</span>.
+        </div>
+      )}
     </div>
   );
 }

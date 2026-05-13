@@ -97,10 +97,12 @@ function emptySession(id: string, tabId: number, meetingTitle?: string): Meeting
 
 // Domains we treat as the rep's own org or generic personal mail — these
 // attendees are not the prospect, so we shouldn't infer the company from them.
+// The rep's own domain is read from VITE_ALLOWED_DOMAIN (same var as auth).
+const _repDomain = (import.meta.env.VITE_ALLOWED_DOMAIN as string | undefined)?.toLowerCase().trim() || "zop.dev";
 const NON_PROSPECT_DOMAINS = new Set([
   "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
   "yahoo.com", "icloud.com", "me.com", "proton.me", "protonmail.com",
-  "zop.dev", // rep's own org — extend or move into a setting later.
+  _repDomain,
 ]);
 
 function inferCompanyFromAttendees(event: CalendarEvent): string {

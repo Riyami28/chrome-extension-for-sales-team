@@ -226,7 +226,9 @@ async function handleGetDocumentState(
     return;
   }
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // Same fix as handleWriteToDoc: use lastFocusedWindow to reach the actual
+    // browser window, not the side-panel window.
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const url = tab?.url ?? "";
 
     const docType = detectDocType(url);
@@ -324,7 +326,10 @@ async function handleWriteToDoc(
   sendResponse: (r: unknown) => void,
 ) {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    // `lastFocusedWindow: true` finds the active tab in the last focused
+    // browser window. `currentWindow: true` from a service worker resolves
+    // to the side-panel window, which never contains a Slides/Docs tab.
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const url = tab?.url ?? "";
     const slides = (payload as { slides?: SlideContent[] })?.slides ?? [];
     const result = await writeToDoc({ url, slides });

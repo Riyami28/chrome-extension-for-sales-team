@@ -81,14 +81,21 @@ export async function findCurrentMeetingFromCalendar(meetUrl: string): Promise<C
 export async function connectCalendarInteractive(): Promise<{ ok: boolean; email?: string; error?: string }> {
   try {
     const token = await getToken({ interactive: true });
-    // Sanity-check the token gets us at least one event listing.
-    const res = await fetch(`${BASE}/users/me/calendarList?maxResults=1`, {
+    // Use the userinfo endpoint to reliably obtain the user's email.
+    // calendarList[0].id happens to equal the email for the primary calendar
+    // but that's an implementation detail; userinfo is the canonical source.
+    const infoRes = await fetch("https://www.googleapis.com/oauth2/v1/userinfo?alt=json", {
       headers: { Authorization: `Bearer ${token}` },
     });
-    if (!res.ok) return { ok: false, error: `Calendar API ${res.status}` };
-    const body = await res.json();
-    const email = body.items?.[0]?.id;
-    return { ok: true, email };
+    if (!infoRes.ok) return { ok: false, error: `Google userinfo ${infoRes.status}` };
+    const info = (await infoRes.json()) as { email?: string; name?: string };
+    // Also verify calendar access by listing one event — confirms the
+    // calendar scope was actually granted.
+    const calRes = await fetch(`${BASE}/users/me/calendarList?maxResults=1`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!calRes.ok) return { ok: false, error: `Calendar API ${calRes.status}` };
+    return { ok: true, email: info.email };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
