@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    # Zoho CRM OAuth — kept server-side so the client_secret is never exposed
+    # in the extension bundle. The extension proxies refresh-token exchanges
+    # through /api/v1/zoho/refresh. Closes #33.
+    zoho_client_id: str = ""
+    zoho_client_secret: str = ""
+
     # App
     backend_url: str = "http://localhost:8000"
     allowed_origins: List[str] = ["chrome-extension://", "http://localhost:3000"]

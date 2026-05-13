@@ -1,8 +1,13 @@
 // Minimal Zoho CRM client. Auth via chrome.identity.launchWebAuthFlow.
 // Tokens are cached in chrome.storage.local and refreshed on 401.
 // Only pulls what we need for pre-call context: account, deal, contact, recent note.
+//
+// Security: the Zoho client_secret never touches the browser. All refresh-token
+// exchanges go through the backend proxy at /api/v1/zoho/refresh which holds
+// the client_id + client_secret server-side. Closes #33.
 
 import type { CRMContext } from "../../shared/types";
+import { backendUrl, backendJwt } from "../../shared/agents/llm-client";
 
 const TOKEN_KEY = "clientlens.zoho.tokens";
 
@@ -43,10 +48,9 @@ async function clearTokens(): Promise<void> {
 
 export async function connectZoho(): Promise<ZohoTokens> {
   const clientId = import.meta.env.VITE_ZOHO_CLIENT_ID;
-  const clientSecret = import.meta.env.VITE_ZOHO_CLIENT_SECRET;
   const redirectUri = import.meta.env.VITE_ZOHO_REDIRECT_URI;
-  if (!clientId || !clientSecret || !redirectUri) {
-    throw new Error("Zoho OAuth env vars missing. Set VITE_ZOHO_CLIENT_ID / _SECRET / _REDIRECT_URI.");
+  if (!clientId || !redirectUri) {
+    throw new Error("Zoho OAuth env vars missing. Set VITE_ZOHO_CLIENT_ID and VITE_ZOHO_REDIRECT_URI.");
   }
 
   const authUrl = new URL(`${accountsBase()}/oauth/v2/auth`);
@@ -70,16 +74,17 @@ export async function connectZoho(): Promise<ZohoTokens> {
   const code = new URL(redirected).searchParams.get("code");
   if (!code) throw new Error("No auth code from Zoho");
 
-  const tokenRes = await fetch(`${accountsBase()}/oauth/v2/token`, {
+  // Token exchange goes through the backend proxy so the client_secret stays
+  // server-side and is never baked into the extension bundle. Closes #33.
+  const proxyUrl = `${backendUrl()}/api/v1/zoho/exchange`;
+  const jwt = await backendJwt();
+  const tokenRes = await fetch(proxyUrl, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "authorization_code",
-      client_id: clientId,
-      client_secret: clientSecret,
-      redirect_uri: redirectUri,
-      code,
-    }).toString(),
+    headers: {
+      "Content-Type": "application/json",
+      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    },
+    body: JSON.stringify({ code, redirect_uri: redirectUri, dc: dc() }),
   });
   if (!tokenRes.ok) throw new Error(`Zoho token exchange ${tokenRes.status}`);
   const body = (await tokenRes.json()) as { access_token: string; refresh_token: string; expires_in: number };
@@ -95,17 +100,15 @@ export async function connectZoho(): Promise<ZohoTokens> {
 }
 
 async function refresh(tokens: ZohoTokens): Promise<ZohoTokens> {
-  const clientId = import.meta.env.VITE_ZOHO_CLIENT_ID!;
-  const clientSecret = import.meta.env.VITE_ZOHO_CLIENT_SECRET!;
-  const res = await fetch(`${accountsBase()}/oauth/v2/token`, {
+  // Proxy through the backend so the client_secret stays server-side. Closes #33.
+  const jwt = await backendJwt();
+  const res = await fetch(`${backendUrl()}/api/v1/zoho/refresh`, {
     method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "refresh_token",
-      client_id: clientId,
-      client_secret: clientSecret,
-      refresh_token: tokens.refresh_token,
-    }).toString(),
+    headers: {
+      "Content-Type": "application/json",
+      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+    },
+    body: JSON.stringify({ refresh_token: tokens.refresh_token, dc: tokens.dc }),
   });
   if (!res.ok) {
     await clearTokens();
@@ -159,20 +162,26 @@ async function tokensFromSettings(): Promise<ZohoTokens | null> {
     // Lazy-import settings to avoid circular deps with this file being used in BG context.
     const { getSettings } = await import("../../shared/utils/settings-storage");
     const cfg = getSettings().integrations.zoho;
-    const { clientId, clientSecret, refreshToken, apiDomain } = cfg.fields;
-    if (!clientId || !clientSecret || !refreshToken || !apiDomain) return null;
+    const { refreshToken, apiDomain } = cfg.fields;
+    if (!refreshToken || !apiDomain) return null;
 
-    const accountsHost = (cfg.fields.accountsUrl || "https://accounts.zoho.com").replace(/\/$/, "");
-    const res = await fetch(
-      `${accountsHost}/oauth/v2/token?refresh_token=${encodeURIComponent(refreshToken)}&client_id=${encodeURIComponent(clientId)}&client_secret=${encodeURIComponent(clientSecret)}&grant_type=refresh_token`,
-      { method: "POST" },
-    );
+    // Derive DC from apiDomain (e.g. "https://www.zohoapis.eu/..." → "eu").
+    const domainDc = (apiDomain.match(/zohoapis\.([a-z.]+)/)?.[1] || "com").replace(/\.$/, "");
+
+    // Proxy through the backend so client_secret stays server-side. Closes #33.
+    const jwt = await backendJwt();
+    const res = await fetch(`${backendUrl()}/api/v1/zoho/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+      },
+      body: JSON.stringify({ refresh_token: refreshToken, dc: domainDc }),
+    });
     if (!res.ok) return null;
     const body = (await res.json()) as { access_token?: string; expires_in?: number };
     if (!body.access_token) return null;
 
-    // Derive DC from apiDomain (e.g. "https://www.zohoapis.eu/..." → "eu").
-    const domainDc = (apiDomain.match(/zohoapis\.([a-z.]+)/)?.[1] || "com").replace(/\.$/, "");
     return {
       access_token: body.access_token,
       refresh_token: refreshToken,

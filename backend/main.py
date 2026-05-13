@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import structlog
 
-from api.routes import generate, assets, admin, auth, llm, stt
+from api.routes import generate, assets, admin, auth, llm, stt, zoho
 from api.middleware.auth import AuthMiddleware
 from db.supabase_client import init_supabase
 from rag.vector_store import init_vector_store
@@ -63,6 +63,8 @@ app.include_router(admin.router, prefix="/admin", tags=["admin"])
 app.include_router(llm.router, prefix="/api", tags=["llm"])
 # STT token proxy — mints short-lived Deepgram keys so the API key stays server-side.
 app.include_router(stt.router, prefix="/api", tags=["stt"])
+# Zoho CRM OAuth refresh proxy — keeps client_secret server-side. Closes #33.
+app.include_router(zoho.router, prefix="/api", tags=["zoho"])
 
 
 @app.get("/health")

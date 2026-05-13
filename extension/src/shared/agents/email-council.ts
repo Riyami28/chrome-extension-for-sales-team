@@ -46,7 +46,7 @@ function summarizeKB(kb: KBEntry[], limit = 10): string {
   if (!kb.length) return "(knowledge base is empty)";
   return kb
     .slice(0, limit)
-    .map((e, i) => `--- SOURCE ${i + 1} · ns=${e.namespace} · id=${e.id} · "${e.name}" ---\n${e.content.slice(0, 1200)}`)
+    .map((e, i) => `--- SOURCE ${i + 1} · ns=${e.namespace} · id=${e.id} · "${e.name}" ---\n${(e.content ?? "").slice(0, 1200)}`)
     .join("\n\n");
 }
 
@@ -185,7 +185,7 @@ Return JSON:
 
 async function brandCheckAgent(client: LLMClient, draft: EmailDraft, kb: KBEntry[]): Promise<AgentResult> {
   const brandVoice = kb.filter((e) => e.namespace === "brand_voice" && e.status === "ready");
-  const guidance = brandVoice.map((e) => e.content.slice(0, 1500)).join("\n\n");
+  const guidance = brandVoice.map((e) => (e.content ?? "").slice(0, 1500)).join("\n\n");
 
   const system = `You are the Brand Compliance Agent. Score the email against ClientLens voice. Output strict JSON.`;
   const user = `GUIDANCE:

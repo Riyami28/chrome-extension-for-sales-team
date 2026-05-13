@@ -73,7 +73,23 @@ export function MeetingCopilotPanel() {
     setCalendarBusy(false);
   }
 
-  useEffect(() => { void listKB().then(setKbEntries).catch(() => setKbEntries([])); }, []);
+  useEffect(() => {
+    void listKB().then(setKbEntries).catch(() => setKbEntries([]));
+    // Refresh KB whenever chrome.storage.local changes so entries added
+    // mid-session (e.g., from another panel) are visible to live agents.
+    const onStorageChanged = (
+      changes: Record<string, chrome.storage.StorageChange>,
+      area: string,
+    ) => {
+      if (area === "local" && "clientlens_kb" in changes) {
+        void listKB().then(setKbEntries).catch(() => setKbEntries([]));
+      }
+    };
+    try { chrome.storage?.onChanged?.addListener(onStorageChanged); } catch { /* non-extension env */ }
+    return () => {
+      try { chrome.storage?.onChanged?.removeListener(onStorageChanged); } catch { /* noop */ }
+    };
+  }, []);
   useEffect(() => { setHistory(listSessionHistory()); }, [summary]);
 
   useEffect(() => {

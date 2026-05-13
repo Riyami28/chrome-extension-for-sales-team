@@ -148,7 +148,7 @@ async function writeSlides(
   if (genCount > existingCount) {
     for (let i = existingCount; i < genCount; i++) {
       const slide = generated[i];
-      const slideId = `zn_${Date.now()}_${i}`;
+      const slideId = `zn_${Date.now()}_${Math.random().toString(36).slice(2, 7)}_${i}`;
       const titleId = `${slideId}_title`;
       const bodyId = `${slideId}_body`;
       const { title, body } = stringifySlide(slide);

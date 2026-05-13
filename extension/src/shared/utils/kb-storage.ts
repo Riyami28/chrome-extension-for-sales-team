@@ -103,6 +103,19 @@ export async function removeKB(id: string): Promise<void> {
   await writeAll(all.filter((e) => e.id !== id));
 }
 
+/**
+ * Wipe every KB entry from chrome.storage.local AND every chunk embedding from
+ * IndexedDB in one atomic operation. Use this instead of calling writeAll([])
+ * directly so the two stores are always kept consistent.
+ */
+export async function clearAllKB(): Promise<void> {
+  await writeAll([]);
+  try {
+    const { clearAllChunks } = await import("./kb-vector-store");
+    await clearAllChunks();
+  } catch { /* IndexedDB may be unavailable in non-extension contexts */ }
+}
+
 /** Patch a single entry in place. Used by the indexer to write index_status. */
 export async function updateKB(id: string, patch: Partial<KBEntry>): Promise<void> {
   const all = await readAll();

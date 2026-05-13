@@ -270,9 +270,19 @@ function extractPageContext() {
   const title = document.title;
   const metaDesc = document.querySelector('meta[name="description"]')?.getAttribute("content") ?? "";
 
-  // LinkedIn company page detection
-  const linkedInCompany = document.querySelector(".org-top-card-summary__title")?.textContent?.trim();
-  const linkedInIndustry = document.querySelector(".org-top-card-summary-info-list__info-item")?.textContent?.trim();
+  // LinkedIn company page detection — try stable data-attributes first, fall
+  // back to obfuscated CSS classes that LinkedIn rotates between deploys.
+  const linkedInCompany = (
+    document.querySelector<HTMLElement>('[data-test-id="org-name"]') ??
+    document.querySelector<HTMLElement>('h1[data-anonymize="organization-name"]') ??
+    document.querySelector<HTMLElement>(".org-top-card-summary__title") ??
+    document.querySelector<HTMLElement>('h1.ember-view')
+  )?.textContent?.trim();
+  const linkedInIndustry = (
+    document.querySelector<HTMLElement>('[data-test-id="org-industry"]') ??
+    document.querySelector<HTMLElement>('div[data-anonymize="industry"]') ??
+    document.querySelector<HTMLElement>(".org-top-card-summary-info-list__info-item")
+  )?.textContent?.trim();
 
   // Generic company name detection
   const ogSiteName = document.querySelector('meta[property="og:site_name"]')?.getAttribute("content");

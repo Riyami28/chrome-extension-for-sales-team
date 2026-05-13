@@ -1043,6 +1043,18 @@ chrome.runtime.onMessage.addListener((msg) => {
     // `thinking: null` clears the live preview pill; an object replaces it.
     // Use `in` so an explicit null clears, but undefined is left alone.
     if ("thinking" in patch) state.thinking = patch.thinking ?? null;
+    // Manage silence timer on status transitions:
+    // - Pause: clear the running timer so it doesn't fire spuriously mid-pause.
+    // - Resume to listening: restart a fresh timer from zero.
+    if (patch.status && patch.status !== state.status) {
+      if (patch.status !== "listening") {
+        if (silenceTimer) { window.clearTimeout(silenceTimer); silenceTimer = undefined; }
+        state.silenceWarning = false;
+      } else if (patch.status === "listening") {
+        resetSilenceTimer();
+      }
+    }
+    if (patch.status) state.status = patch.status;
     const seg = patch.latest;
     if (seg && seg.text && seg.id !== state.transcript[state.transcript.length - 1]?.id) {
       state.transcript = [...state.transcript, seg].slice(-50);
@@ -1089,10 +1101,14 @@ function ensureStyle() {
 
 function isMeetingLive(): boolean {
   // Heuristics for "call is active" rather than the landing page:
-  // - Meeting code path like /xxx-xxxx-xxx (not /landing)
+  // - Any path that looks like a meeting code: standard /abc-defg-hij OR
+  //   Google Workspace persistent rooms (/lookup/myroom, /my-room-name, etc.)
   // - Presence of the bottom control bar (mic/camera/leave buttons)
   const path = location.pathname;
-  if (!/^\/[a-z]{3}-[a-z]{4}-[a-z]{3}$/i.test(path)) return false;
+  // Exclude known non-meeting paths: root, /landing, /about, /new, empty.
+  if (!path || path === "/" || /^\/(landing|about|new|u\/|_)\b/i.test(path)) return false;
+  // Require at least one alphanumeric segment — filters out bare "/" variants.
+  if (!/\/[a-z0-9]/i.test(path)) return false;
   const hasControls =
     !!document.querySelector('[aria-label*="microphone" i]') ||
     !!document.querySelector('[aria-label*="leave call" i]') ||

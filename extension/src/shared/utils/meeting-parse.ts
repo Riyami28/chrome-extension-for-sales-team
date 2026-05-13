@@ -11,8 +11,17 @@
  * across Outlook / Apple Calendar / Google Calendar / forwarded text.
  */
 
-import { makeLLMClient, resolveLLMConfig } from "../agents/llm-client";
+import { makeLLMClient, resolveLLMConfig, type LLMProvider } from "../agents/llm-client";
 import type { AgendaItem } from "../types";
+
+// Fast-tier model map — same provider, lighter model. Parsing an invite is a
+// simple extraction task; no reason to burn the full model on it.
+const FAST_MODELS: Partial<Record<LLMProvider, string>> = {
+  anthropic: "claude-haiku-4-5-20251001",
+  gemini: "gemini-2.0-flash-lite",
+  groq: "llama-3.1-8b-instant",
+  openrouter: "openai/gpt-oss-20b:free",
+};
 
 export interface ParsedInvite {
   company_name?: string;
@@ -74,7 +83,16 @@ export async function parsePastedInvite(input: string): Promise<ParsedInvite> {
   const text = input.trim();
   if (!text) return {};
 
-  const cfg = resolveLLMConfig();
+  const baseCfg = resolveLLMConfig();
+  if ("error" in baseCfg) {
+    throw new Error(baseCfg.error);
+  }
+  // Use the fast-tier model for invite parsing — it's a lightweight extraction
+  // task, and we don't need the full model's capacity or quota.
+  const fastModel = FAST_MODELS[baseCfg.provider];
+  const cfg = fastModel
+    ? resolveLLMConfig({ provider: baseCfg.provider, model: fastModel })
+    : baseCfg;
   if ("error" in cfg) {
     throw new Error(cfg.error);
   }

@@ -27,6 +27,7 @@ import {
   type IntegrationId,
   type IntegrationConfig,
 } from "../../shared/utils/settings-storage";
+import { clearAllKB } from "../../shared/utils/kb-storage";
 import {
   testZoho,
   testGoogleMeet,
@@ -150,6 +151,10 @@ export function SettingsPanel({ open, onClose }: Props) {
 
   function onWipe() {
     const { removed } = clearAllSessionData();
+    // Also clear IndexedDB vector chunks so the KB is fully wiped, not just
+    // the chrome.storage.local metadata. clearAllKB is fire-and-forget here
+    // since the session-data wipe already gave the user feedback.
+    void clearAllKB().catch(() => { /* IndexedDB may not be available */ });
     setWipeState("done");
     setWipeNote(
       removed.length
