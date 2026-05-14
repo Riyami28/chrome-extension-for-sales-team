@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  # ── Extension ────────────────────────────────────────────────────────────────
+  extension:
+    name: Extension — type-check / lint / build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+        env:
+          # Provide the minimum env vars Vite needs to resolve import.meta.env
+          # references without erroring. Values don't need to be real for a
+          # build check — the output is never deployed from CI.
+          VITE_LLM_PROVIDER: gemini
+          VITE_GEMINI_API_KEY: ci-placeholder
+          VITE_BACKEND_URL: http://localhost:8000
+          VITE_SUPABASE_URL: https://placeholder.supabase.co
+          VITE_SUPABASE_ANON_KEY: ci-placeholder
+          VITE_ALLOWED_DOMAIN: example.com
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: extension-dist
+          path: extension/dist/
+          retention-days: 7
+
+  # ── Backend ───────────────────────────────────────────────────────────────────
+  backend:
+    name: Backend — lint / import-check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt ruff
+
+      - name: Lint (ruff)
+        run: ruff check . --select E,F,W --ignore E501
+
+      - name: Import check — all route modules load without error
+        # Catches missing imports, syntax errors, and bad config defaults.
+        # Uses stub env vars so pydantic-settings doesn't raise on missing
+        # required fields (supabase_url / supabase_service_key).
+        env:
+          SUPABASE_URL: https://placeholder.supabase.co
+          SUPABASE_SERVICE_KEY: placeholder
+          JWT_SECRET: ci-placeholder-secret-not-prod
+          DEV_MODE: "true"
+        run: |
+          python -c "
+          import importlib, sys
+          modules = [
+              'config',
+              'api.routes.auth',
+              'api.routes.llm',
+              'api.routes.stt',
+              'api.routes.zoho',
+              'api.routes.generate',
+              'api.routes.assets',
+              'api.routes.admin',
+              'api.middleware.quota',
+          ]
+          failed = []
+          for m in modules:
+              try:
+                  importlib.import_module(m)
+                  print(f'  OK  {m}')
+              except Exception as e:
+                  print(f'  FAIL {m}: {e}')
+                  failed.append(m)
+          if failed:
+              print(f'\n{len(failed)} module(s) failed to import.')
+              sys.exit(1)
+          print(f'\nAll {len(modules)} modules imported successfully.')
+          "
