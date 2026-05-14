@@ -30,8 +30,6 @@
     "https://www.notion.so/*",
     "https://www.linkedin.com/*",
     "https://*.supabase.co/*",
-    "https://your-backend.railway.app/*",
-    "http://localhost:8000/*",
     "https://api.deepgram.com/*",
     "wss://api.deepgram.com/*",
     "https://www.googleapis.com/*",
@@ -42,11 +40,9 @@
     "https://accounts.zoho.in/*",
     "https://accounts.zoho.eu/*",
     "https://meet.google.com/*",
-    "http://localhost:11434/*",
     "https://logo.clearbit.com/*",
     "https://www.google.com/*",
-    "https://icons.duckduckgo.com/*",
-    "<all_urls>"
+    "https://icons.duckduckgo.com/*"
   ],
 
   "background": {
@@ -56,7 +52,11 @@
 
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": [
+        "https://docs.google.com/*",
+        "https://www.notion.so/*",
+        "https://www.linkedin.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_idle"
     },
@@ -84,7 +84,12 @@
   "web_accessible_resources": [
     {
       "resources": ["*.js", "*.css", "*.png", "*.svg"],
-      "matches": ["<all_urls>"]
+      "matches": [
+        "https://docs.google.com/*",
+        "https://www.notion.so/*",
+        "https://meet.google.com/*",
+        "https://www.linkedin.com/*"
+      ]
     }
   ],
 

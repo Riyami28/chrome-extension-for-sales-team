@@ -22,6 +22,18 @@ from config import settings
 router = APIRouter()
 log = structlog.get_logger()
 
+# Zoho data-centre allowlist. Validating against a known set prevents a caller
+# from steering the token-exchange POST at an attacker-controlled host like
+# accounts.zoho.<anything>. Keep in sync with Zoho's published DC list.
+_ALLOWED_ZOHO_DCS = {"com", "eu", "in", "com.cn", "com.au", "jp"}
+
+
+def _resolve_dc(raw: str) -> str:
+    dc = "".join(c for c in (raw or "") if c.isalpha() or c == ".").strip(".") or "com"
+    if dc not in _ALLOWED_ZOHO_DCS:
+        raise HTTPException(400, f"Unsupported Zoho data centre: {dc!r}")
+    return dc
+
 
 class ZohoRefreshRequest(BaseModel):
     refresh_token: str
@@ -46,7 +58,7 @@ async def zoho_exchange(body: ZohoExchangeRequest):
     if not client_id or not client_secret:
         raise HTTPException(503, "Zoho credentials not configured on the server.")
 
-    dc = "".join(c for c in body.dc if c.isalpha() or c == ".").strip(".") or "com"
+    dc = _resolve_dc(body.dc)
     accounts_url = f"https://accounts.zoho.{dc}/oauth/v2/token"
 
     async with httpx.AsyncClient(timeout=15) as client:
@@ -92,7 +104,7 @@ async def zoho_refresh(body: ZohoRefreshRequest):
         )
 
     # Sanitise the dc suffix — only lowercase letters and dots.
-    dc = "".join(c for c in body.dc if c.isalpha() or c == ".").strip(".") or "com"
+    dc = _resolve_dc(body.dc)
     accounts_url = f"https://accounts.zoho.{dc}/oauth/v2/token"
 
     async with httpx.AsyncClient(timeout=15) as client:
