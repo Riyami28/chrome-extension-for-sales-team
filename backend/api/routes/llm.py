@@ -39,30 +39,46 @@ router = APIRouter()
 log = structlog.get_logger()
 
 
-# ── OpenRouter global rate-limiter ───────────────────────────────────────────
-# Free tier allows ~10 req/min per model. We enforce a 3-second minimum gap
-# between calls + a concurrency cap of 1 so burst requests from the council
-# pipeline (4 sequential agents) and live copilot don't stack up and 429.
-# Requests queue here rather than failing — worst case a pitch takes ~12s
-# instead of ~3s, which is far better than an error.
+# ── OpenRouter rate-limiter (two lanes) ──────────────────────────────────────
+# Two separate semaphores so user-triggered KB asks (priority=True) never queue
+# behind in-flight background agents (coach / sentiment / agenda).
+#
+#   _or_lock_bg  — background agents: 1 concurrent, 3 s minimum gap
+#   _or_lock_user — user asks + pitch: 1 concurrent, no enforced gap
+#
+# Both lanes can fire simultaneously (2 concurrent OR calls) which stays well
+# within the free-tier 10 req/min limit. A 429 from concurrency is handled by
+# the retry logic in each caller.
 
-_or_lock = asyncio.Semaphore(1)       # only 1 OpenRouter call in-flight at a time
-_or_last_call: float = 0.0            # epoch seconds of last completed call
-_OR_MIN_GAP_S = 3.0                   # minimum seconds between calls
+_or_lock_bg   = asyncio.Semaphore(1)  # background agents
+_or_lock_user = asyncio.Semaphore(1)  # user-triggered requests
+_or_last_bg_call: float = 0.0         # last completed background call (for gap enforcement)
+_OR_MIN_GAP_S = 3.0
 
 
-async def _or_post(headers: dict, body: dict) -> httpx.Response:
-    """Rate-limited POST to OpenRouter. Queues callers instead of 429-ing."""
-    global _or_last_call
-    async with _or_lock:
-        gap = _OR_MIN_GAP_S - (time.monotonic() - _or_last_call)
-        if gap > 0:
-            log.debug("openrouter.throttle", wait_s=round(gap, 2))
-            await asyncio.sleep(gap)
-        try:
+async def _or_post(headers: dict, body: dict, priority: bool = False) -> httpx.Response:
+    """Two-lane rate-limited POST to OpenRouter.
+
+    priority=True  → user lane (_or_lock_user): no gap wait, fires as soon as
+                      any previous user call finishes. Never blocked by coach.
+    priority=False → background lane (_or_lock_bg): 3-second minimum gap
+                      between background calls to stay inside the free-tier cap.
+    """
+    global _or_last_bg_call
+    if priority:
+        async with _or_lock_user:
+            log.debug("openrouter.user_lane")
             return await _http().post(OPENROUTER_URL, headers=headers, json=body)
-        finally:
-            _or_last_call = time.monotonic()
+    else:
+        async with _or_lock_bg:
+            gap = _OR_MIN_GAP_S - (time.monotonic() - _or_last_bg_call)
+            if gap > 0:
+                log.debug("openrouter.throttle", wait_s=round(gap, 2))
+                await asyncio.sleep(gap)
+            try:
+                return await _http().post(OPENROUTER_URL, headers=headers, json=body)
+            finally:
+                _or_last_bg_call = time.monotonic()
 
 
 # ── Request / response shapes ────────────────────────────────────────────────
@@ -598,7 +614,7 @@ def _openrouter_body(req: LLMRequest, *, stream: bool = False) -> dict:
     }
 
 
-async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
+async def _complete_openrouter(req: LLMRequest, priority: bool = False) -> LLMResponse:
     import asyncio as _asyncio
     import uuid as _uuid
     api_key = _openrouter_key()
@@ -607,7 +623,7 @@ async def _complete_openrouter(req: LLMRequest) -> LLMResponse:
         if delay:
             log.info("openrouter.retry", attempt=attempt, delay_s=delay, model=req.model)
             await _asyncio.sleep(delay)
-        res = await _or_post(_openrouter_headers(api_key), _openrouter_body(req))
+        res = await _or_post(_openrouter_headers(api_key), _openrouter_body(req), priority=priority)
         if res.status_code != 429:
             break
         log.warning("openrouter.rate_limited", attempt=attempt, model=req.model)
@@ -788,7 +804,8 @@ async def complete(request: Request, body: LLMRequest) -> LLMResponse:
         elif body.provider == "groq":
             response = await _complete_groq(body)
         elif body.provider == "openrouter":
-            response = await _complete_openrouter(body)
+            priority = request.headers.get("x-priority") == "true"
+            response = await _complete_openrouter(body, priority=priority)
         else:
             # Unreachable — _reject_unproxied above guards this.
             raise HTTPException(status_code=500, detail="provider dispatch fell through")

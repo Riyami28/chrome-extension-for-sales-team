@@ -89,7 +89,7 @@
   ],
 
   "oauth2": {
-    "client_id": "YOUR_GOOGLE_CLIENT_ID",
+    "client_id": "311744529716-csv7nhp0q2ennnek624u87hi2e9a3u8a.apps.googleusercontent.com",
     "scopes": [
       "openid",
       "email",
